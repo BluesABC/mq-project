@@ -1,7 +1,5 @@
 #include "mq/protocol/protocol_codec.h"
 
-#include <limits>
-
 namespace mq::protocol {
 namespace {
 
@@ -82,11 +80,16 @@ bool ProtocolCodec::EncodeResponse(const Response& response, std::string* frame,
 }
 
 bool ProtocolCodec::DecodeRequest(std::string_view frame, Request* request, std::string* error) {
-  if (request == nullptr || frame.size() < 20) return false;
+  if (request == nullptr || frame.size() < 20) {
+    if (error != nullptr) *error = "request header is truncated";
+    return false;
+  }
   const auto topic_len = Get16(frame, 14);
-  if (!Take(frame, &const_cast<std::size_t&>(static_cast<const std::size_t&>(20)), 0, error)) return false;
   const std::size_t payload_offset = 20 + topic_len;
-  if (payload_offset > frame.size() || payload_offset + 4 > frame.size()) return false;
+  if (payload_offset > frame.size() || payload_offset + 4 > frame.size()) {
+    if (error != nullptr) *error = "request topic header is truncated";
+    return false;
+  }
   if (!ValidCommon(frame, 20 + topic_len + 4, payload_offset + 4, static_cast<std::uint8_t>(frame[2]),
                    Get32(frame, payload_offset), error)) return false;
   request->version = static_cast<std::uint8_t>(frame[2]); request->command = static_cast<Command>(frame[3]);
