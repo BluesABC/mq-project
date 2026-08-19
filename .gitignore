@@ -1,0 +1,29 @@
+# 构建产物
+build/
+cmake-build-*/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+*.pdb
+
+# 数据与运行产物
+mqdata/
+data/
+*.log
+*.idx
+*.pid
+
+# IDE / 系统
+.vs/
+.vscode/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.swp
+*~
