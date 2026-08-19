@@ -37,7 +37,7 @@ class StorageEngine {
   struct Partition;
   Partition* GetPartition(const std::string& topic, std::uint32_t partition,
                           std::string* error) const;
-  bool Recover(Partition* partition, std::string* error);
+  bool Recover(Partition* partition, std::string* error) const;
 
   std::filesystem::path data_dir_;
   mutable std::mutex mutex_;

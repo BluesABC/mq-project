@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### P1 基础能力
+- 实现协议请求/响应帧编解码及 magic、版本、长度和 payload 上限校验。
+- 实现单分区 WAL 追加、读取、CRC 校验和重启时损坏尾部截断恢复。
+- 增加核心模块 CMake 测试目标。
+
 ### 骨架（P0）
 - 建立仓库结构与 CMake 构建骨架。
 - 文档体系：PRD、AGENTS、architecture、design-details、api-spec、test-plan、deployment。

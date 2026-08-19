@@ -11,3 +11,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(MQ_BUILD_TESTS "Build unit & integration tests" OFF)
 option(MQ_BUILD_BENCH "Build benchmark binaries" OFF)
 option(MQ_BUILD_SERVER "Build broker server binary" ON)
+
+add_library(mq_protocol src/protocol/protocol_codec.cc)
+target_include_directories(mq_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_library(mq_core src/core/storage/storage_engine.cc)
+target_include_directories(mq_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(MQ_BUILD_TESTS)
+  enable_testing()
+  add_executable(mq_core_tests test/unit/core_protocol_storage_test.cc)
+  target_link_libraries(mq_core_tests PRIVATE mq_core mq_protocol)
+  target_include_directories(mq_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME mq_core_tests COMMAND mq_core_tests)
+endif()

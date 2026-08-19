@@ -13,13 +13,6 @@ void Put32(std::string* out, std::uint32_t value) {
 void Put64(std::string* out, std::uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
-bool Take(std::string_view in, std::size_t* pos, std::size_t count, std::string* error) {
-  if (count > in.size() - *pos) {
-    if (error != nullptr) *error = "frame is truncated";
-    return false;
-  }
-  return true;
-}
 std::uint16_t Get16(std::string_view in, std::size_t pos) {
   return (static_cast<std::uint16_t>(static_cast<unsigned char>(in[pos])) << 8) |
          static_cast<unsigned char>(in[pos + 1]);
@@ -85,16 +78,18 @@ bool ProtocolCodec::DecodeRequest(std::string_view frame, Request* request, std:
     return false;
   }
   const auto topic_len = Get16(frame, 14);
-  const std::size_t payload_offset = 20 + topic_len;
-  if (payload_offset > frame.size() || payload_offset + 4 > frame.size()) {
+  const std::size_t payload_length_offset = 16 + topic_len;
+  const std::size_t payload_offset = payload_length_offset + 4;
+  if (payload_offset > frame.size()) {
     if (error != nullptr) *error = "request topic header is truncated";
     return false;
   }
-  if (!ValidCommon(frame, 20 + topic_len + 4, payload_offset + 4, static_cast<std::uint8_t>(frame[2]),
-                   Get32(frame, payload_offset), error)) return false;
+  if (!ValidCommon(frame, payload_offset, payload_offset, static_cast<std::uint8_t>(frame[2]),
+                   Get32(frame, payload_length_offset), error)) return false;
   request->version = static_cast<std::uint8_t>(frame[2]); request->command = static_cast<Command>(frame[3]);
   request->request_id = Get64(frame, 4); request->flags = Get16(frame, 12);
-  request->topic.assign(frame.substr(16, topic_len)); request->payload.assign(frame.substr(payload_offset + 4));
+  request->topic.assign(frame.substr(16, topic_len));
+  request->payload.assign(frame.substr(payload_offset));
   return true;
 }
 
