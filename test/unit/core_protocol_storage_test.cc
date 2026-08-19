@@ -1,6 +1,5 @@
 #include <cassert>
 #include <filesystem>
-#include <iostream>
 #include <string>
 #include <vector>
 
@@ -44,9 +43,6 @@ void StorageRoundTrip() {
     assert(storage.Open());
     std::vector<mq::core::Message> messages;
     assert(storage.Read("orders", 0, 1, 1024, &messages));
-    std::cerr << "messages=" << messages.size();
-    if (!messages.empty()) std::cerr << " value=" << messages.front().value;
-    std::cerr << "\n";
     assert(messages.size() == 1 && messages.front().value == "two");
   }
   std::filesystem::remove_all(root, ec);

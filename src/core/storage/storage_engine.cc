@@ -46,6 +46,17 @@ std::string PathFor(const std::filesystem::path& root, const std::string& topic,
                    std::uint32_t partition) {
   return (root / "queues" / topic / (std::to_string(partition) + ".log")).string();
 }
+bool ValidTopic(const std::string& topic) {
+  if (topic.empty() || topic.size() > 64 || topic == "." || topic == "..") return false;
+  for (const char character : topic) {
+    const bool valid = (character >= 'a' && character <= 'z') ||
+                       (character >= 'A' && character <= 'Z') ||
+                       (character >= '0' && character <= '9') || character == '_' ||
+                       character == '-' || character == '.';
+    if (!valid) return false;
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -99,7 +110,8 @@ bool StorageEngine::Recover(Partition* partition, std::string* error) const {
     const auto key_len = Get16(body, 16); const auto value_len = Get32(body, 18 + key_len);
     if (22ull + key_len + value_len != len) break;
     Message message; message.offset = Get64(body, 0); message.timestamp_ms = static_cast<std::int64_t>(Get64(body, 8));
-    message.key.assign(body, 18, key_len); message.value.assign(body, 22 + key_len, value_len);
+    message.key.assign(body, 18, key_len);
+    message.value.assign(body, 22 + key_len, value_len);
     if (!partition->messages.empty() && message.offset != partition->messages.back().offset + 1) break;
     partition->messages.push_back(std::move(message)); valid_bytes += kRecordHeaderSize + len;
   }
@@ -110,7 +122,8 @@ bool StorageEngine::Recover(Partition* partition, std::string* error) const {
 
 bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, std::string key,
                            std::string value, Message* message, std::string* error) {
-  if (message == nullptr || key.size() > 65535 || value.empty() || value.size() > kMaxMessageBytes) {
+  if (!ValidTopic(topic) || message == nullptr || key.size() > 65535 || value.empty() ||
+      value.size() > kMaxMessageBytes) {
     if (error != nullptr) *error = "invalid message";
     return false;
   }
@@ -134,7 +147,7 @@ bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, st
 
 bool StorageEngine::Read(const std::string& topic, std::uint32_t partition, std::uint64_t start_offset,
                          std::uint32_t max_bytes, std::vector<Message>* messages, std::string* error) const {
-  if (messages == nullptr || max_bytes == 0) return false;
+  if (!ValidTopic(topic) || messages == nullptr || max_bytes == 0) return false;
   std::lock_guard lock(mutex_);
   auto* target = GetPartition(topic, partition, error); if (target == nullptr) return false;
   messages->clear(); std::uint64_t bytes = 0;
