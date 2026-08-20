@@ -4,6 +4,8 @@
 #include <fstream>
 #include <utility>
 
+#include "mq/core/topic.h"
+
 namespace mq::core {
 namespace {
 
@@ -44,18 +46,14 @@ std::uint64_t Get64(const std::string& data, std::size_t pos) {
 }
 std::string PathFor(const std::filesystem::path& root, const std::string& topic,
                    std::uint32_t partition) {
-  return (root / "queues" / topic / (std::to_string(partition) + ".log")).string();
-}
-bool ValidTopic(const std::string& topic) {
-  if (topic.empty() || topic.size() > 64 || topic == "." || topic == "..") return false;
-  for (const char character : topic) {
-    const bool valid = (character >= 'a' && character <= 'z') ||
-                       (character >= 'A' && character <= 'Z') ||
-                       (character >= '0' && character <= '9') || character == '_' ||
-                       character == '-' || character == '.';
-    if (!valid) return false;
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(topic.size() * 2);
+  for (const unsigned char byte : topic) {
+    encoded.push_back(kHex[byte >> 4]);
+    encoded.push_back(kHex[byte & 0x0F]);
   }
-  return true;
+  return (root / "queues" / encoded / (std::to_string(partition) + ".log")).string();
 }
 
 }  // namespace
@@ -122,7 +120,7 @@ bool StorageEngine::Recover(Partition* partition, std::string* error) const {
 
 bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, std::string key,
                            std::string value, Message* message, std::string* error) {
-  if (!ValidTopic(topic) || message == nullptr || key.size() > 65535 || value.empty() ||
+  if (!IsValidTopicName(topic) || message == nullptr || key.size() > 65535 || value.empty() ||
       value.size() > kMaxMessageBytes) {
     if (error != nullptr) *error = "invalid message";
     return false;
@@ -147,7 +145,7 @@ bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, st
 
 bool StorageEngine::Read(const std::string& topic, std::uint32_t partition, std::uint64_t start_offset,
                          std::uint32_t max_bytes, std::vector<Message>* messages, std::string* error) const {
-  if (!ValidTopic(topic) || messages == nullptr || max_bytes == 0) return false;
+  if (!IsValidTopicName(topic) || messages == nullptr || max_bytes == 0) return false;
   std::lock_guard lock(mutex_);
   auto* target = GetPartition(topic, partition, error); if (target == nullptr) return false;
   messages->clear(); std::uint64_t bytes = 0;

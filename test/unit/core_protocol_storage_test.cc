@@ -24,6 +24,30 @@ void ProtocolRoundTrip() {
   assert(!mq::protocol::ProtocolCodec::DecodeRequest(frame, &decoded, &error));
 }
 
+void RequestStreamDecoding() {
+  mq::protocol::Request first;
+  first.command = mq::protocol::Command::kHeartbeat;
+  first.request_id = 1;
+  first.topic = "orders";
+  mq::protocol::Request second;
+  second.command = mq::protocol::Command::kProduce;
+  second.request_id = 2;
+  second.topic = "orders";
+  second.payload = "payload";
+  std::string first_frame, second_frame, error;
+  assert(mq::protocol::ProtocolCodec::EncodeRequest(first, &first_frame, &error));
+  assert(mq::protocol::ProtocolCodec::EncodeRequest(second, &second_frame, &error));
+  mq::protocol::RequestStreamDecoder decoder;
+  std::vector<mq::protocol::Request> requests;
+  assert(decoder.Push(std::string_view(first_frame).substr(0, 9), &requests, &error));
+  assert(requests.empty());
+  const std::string remaining = first_frame.substr(9) + second_frame;
+  assert(decoder.Push(remaining, &requests, &error));
+  assert(requests.size() == 2);
+  assert(requests[0].request_id == first.request_id);
+  assert(requests[1].request_id == second.request_id && requests[1].payload == second.payload);
+}
+
 void StorageRoundTrip() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_storage_test";
   std::error_code ec;
@@ -52,6 +76,7 @@ void StorageRoundTrip() {
 
 int main() {
   ProtocolRoundTrip();
+  RequestStreamDecoding();
   StorageRoundTrip();
   return 0;
 }

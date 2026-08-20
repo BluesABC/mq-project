@@ -1,0 +1,26 @@
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+
+#include "mq/network/event_loop.h"
+#include "mq/protocol/commands.h"
+
+namespace mq::network {
+
+class TcpServer {
+ public:
+  using RequestHandler = std::function<protocol::Response(const protocol::Request&)>;
+  TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler);
+  ~TcpServer();
+  bool Start();
+  void Stop();
+  std::uint16_t port() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace mq::network

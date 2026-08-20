@@ -49,6 +49,21 @@
 | 0x21 | COMMIT_OFFSET | group + partition + offset | 无 |
 | 0x30 | HEARTBEAT | group | 无 |
 
+### 3.1 P1 MVP 载荷布局
+
+除非另有说明，所有整数均为大端字节序，字符串均为 UTF-8 原始字节。`topic` 始终取自请求帧而非命令载荷。
+
+| 命令 | 请求载荷 | 成功响应载荷 |
+|------|----------|--------------|
+| `CREATE_TOPIC` | `partition_count(4)`，范围 1~1024 | 空 |
+| `LIST_TOPIC` | 空 | `count(4)`，重复 `topic_len(2) | topic | partition_count(4)` |
+| `PRODUCE` | `partition(4) | key_len(2) | key | value_len(4) | value`；`partition=0xFFFFFFFF` 表示按 key 路由 | `partition(4) | offset(8)` |
+| `FETCH` | `partition(4) | offset(8) | max_bytes(4)` | `count(4)`，重复 `offset(8) | timestamp_ms(8) | key_len(2) | key | value_len(4) | value` |
+
+- `PRODUCE` 的 `key_len` 最大为 65535，`value_len` 范围为 1~1048576。
+- `FETCH` 的 `max_bytes` 必须大于 0；若起始 offset 超出已提交范围，返回 `INVALID_OFFSET`。
+- 当前 P1 实现只支持 `ack=1` 的本地写入确认；`ack=0` 和 `ack=all` 保留给复制模块。
+
 ## 4. 状态码（Status 枚举）
 
 | 值 | 含义 |

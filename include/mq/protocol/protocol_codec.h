@@ -20,4 +20,12 @@ class ProtocolCodec {
                              std::string* error = nullptr);
 };
 
+class RequestStreamDecoder {
+ public:
+  bool Push(std::string_view bytes, std::vector<Request>* requests, std::string* error = nullptr);
+
+ private:
+  std::string buffer_;
+};
+
 }  // namespace mq::protocol

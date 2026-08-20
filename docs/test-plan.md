@@ -28,16 +28,40 @@ ctest --test-dir build --output-on-failure
 
 ### 3.2 编解码 `codec_test`
 - [ ] 请求/响应帧编解码往返
-- [ ] 粘包/半包（分片读取）解析
+- [x] 请求半包与粘包（分片读取）解析
 - [ ] 字段越界/畸形输入拒绝
 
 ### 3.3 并发原语 `buffer_test`
+- [x] MPMC 环形队列满/空行为
+- [x] MPMC 多生产者多消费者一致性
+- [x] 线程池任务执行与关闭时排空
 - [ ] SPSC 环形队列满/空行为
-- [ ] MPMC 多生产者多消费者一致性
-- [ ] 线程池任务执行与异常传播
+- [ ] 线程池任务异常的调用方可观测策略
+
+### 3.4 EventLoop `event_loop_test`
+- [x] 跨线程任务在 owner 线程执行
+- [x] 停止时排空已接收任务并拒绝后续投递
+- [x] idle 轮询回调在 owner 线程执行
+
+### 3.5 网络缓冲与连接 `network_buffer_connection_test`
+- [x] 内存池的 owner-thread 限制与容量上限
+- [x] 固定读缓冲压缩与背压边界
+- [x] Worker 回投写缓冲并由 owner loop 消费
+
+### 3.6 日志 `logger_test`
+- [x] 日志级别过滤与滚动文件写入
+
+### 3.7 Broker 元数据恢复 `broker_test`
+- [x] 创建 3 个不同分区数的 Topic 后重新构造 Broker，验证 `listTopics` 的名称、排序与分区数完全恢复
+- [x] 验证创建 Topic 后生成 `data/metadata/topics.meta` 快照
+
+### 4.1 TCP 回环集成 `tcp_integration_test`
+- [x] 100 个并发连接通过非阻塞 Winsock 服务正确收发协议帧
 
 ## 4. 集成测试用例（P1 起）
 
+- [x] 进程内 Broker：创建 Topic → 生产 → 拉取消息
+- [x] 进程内 Broker：创建 Topic → 重启 → Topic 元数据恢复
 - [ ] 单 Broker：生产 N 条 → 消费 N 条顺序一致
 - [ ] 多消费者组位点独立提交
 - [ ] 重启后数据恢复（WAL replay）

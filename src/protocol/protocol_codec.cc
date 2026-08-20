@@ -102,4 +102,43 @@ bool ProtocolCodec::DecodeResponse(std::string_view frame, Response* response, s
   response->payload.assign(frame.substr(18)); return true;
 }
 
+bool RequestStreamDecoder::Push(std::string_view bytes, std::vector<Request>* requests,
+                                std::string* error) {
+  if (requests == nullptr || bytes.size() > kMaxPayloadBytes + 65555 ||
+      buffer_.size() > kMaxPayloadBytes + 65555 - bytes.size()) {
+    if (error != nullptr) *error = "request stream buffer exceeds limit";
+    buffer_.clear();
+    return false;
+  }
+  buffer_.append(bytes.data(), bytes.size());
+  while (true) {
+    if (buffer_.size() < 20) return true;
+    if (Get16(buffer_, 0) != kMagic || static_cast<std::uint8_t>(buffer_[2]) != kCurrentVersion) {
+      if (error != nullptr) *error = "invalid request stream header";
+      buffer_.clear();
+      return false;
+    }
+    const std::size_t topic_len = Get16(buffer_, 14);
+    const std::size_t payload_length_offset = 16 + topic_len;
+    if (payload_length_offset + 4 > buffer_.size()) return true;
+    const std::size_t payload_len = Get32(buffer_, payload_length_offset);
+    if (payload_len > kMaxPayloadBytes ||
+        payload_len > kMaxPayloadBytes + 65555 - (payload_length_offset + 4)) {
+      if (error != nullptr) *error = "invalid request stream payload length";
+      buffer_.clear();
+      return false;
+    }
+    const std::size_t frame_size = payload_length_offset + 4 + payload_len;
+    if (buffer_.size() < frame_size) return true;
+    Request request;
+    if (!ProtocolCodec::DecodeRequest(std::string_view(buffer_).substr(0, frame_size), &request,
+                                      error)) {
+      buffer_.clear();
+      return false;
+    }
+    requests->push_back(std::move(request));
+    buffer_.erase(0, frame_size);
+  }
+}
+
 }  // namespace mq::protocol

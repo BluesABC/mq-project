@@ -26,15 +26,28 @@
 ```
 <data_dir>/
   metadata/
-    queues.json            # 队列清单 {topic -> partitions}
+    topics.meta            # Topic 全量快照（二进制，启动时加载）
     groups.json            # 消费组位点
   queues/
-    <topic>/
+      <topic-hex>/              # Topic UTF-8 原始字节的十六进制编码
       <partition>/
         00000000000000000000.log     # 数据段（默认 1GiB 滚动）
         00000000000000000000.idx     # mmap 稀疏索引（默认 8B/条）
         log_start_offset             # 清理起点（字节文件）
 ```
+
+### 1.2.1 Topic 元数据快照
+
+`TopicMetadataStore` 将 Topic 与分区数保存到 `<data_dir>/metadata/topics.meta`。文件使用固定大端二进制布局，避免引入 JSON 解析依赖：
+
+```
+magic(4, "MQTM") | version(4, 1) | topic_count(4)
+重复 topic_count 次：name_len(2) | name(UTF-8 原始字节) | partition_count(4)
+```
+
+- Topic 数最多 1024，名称最多 65535 字节；加载时校验 magic、版本、边界及 Topic 名合法性，非法或截断文件会导致 Broker 启动失败。
+- 创建和删除 Topic 均在 Broker 的元数据互斥区内执行：先更新内存快照，再写入 `topics.meta.tmp`，关闭写流后以原子替换发布 `topics.meta`。Windows 使用 `MoveFileExW` 的 `REPLACE_EXISTING | WRITE_THROUGH`，POSIX 使用同目录 `rename`。
+- 发布失败时 Broker 回滚本次内存变更，避免内存 Topic 列表与已落盘快照分歧。启动时先打开存储，再加载快照并整体替换 `QueueManager` 元数据。
 
 ### 1.3 日志段（.log）字节布局
 
@@ -128,6 +141,9 @@ Main Reactor（1 线程）         Sub Reactor × N（N = CPU 核数）
 
 - 连接与 Reactor 线程绑定：一个连接的所有事件固定在同一线程处理，天然无锁。
 - 每个 Sub Reactor 配一个 **写任务队列**（MPMC），Worker 的响应经此队列投递，由 Reactor 线程触发写。
+- 当前 `EventLoop` 已提供固定 owner 线程与有界跨线程任务投递；socket 事件注册将在 `TcpServer`/`TcpConnection` 接入时叠加到该线程归属模型上。
+- `EventLoop` 的 idle 回调在 owner 线程执行并以 5ms 等待窗口唤醒；Windows `select` 兜底和 Linux epoll 后端将通过该回调驱动，不得另起线程直接操作连接。
+- Windows 当前实现使用非阻塞 Winsock + `select`：accept、连接表、流解码和 socket 写入均在 EventLoop owner 线程；完整请求投递 Worker，Worker 只调用 Handler 并通过 `TcpConnection::Send` 回投响应。
 
 ### 2.2 epoll 后端
 
@@ -156,6 +172,8 @@ read 缓冲（默认 64KB 可增长） → 解析循环：
 
 - 协议解码在 **Worker 线程**完成（Reactor 线程只做 read/write，不做业务解析，满足"网络层不做阻塞 IO"约束）。
 - 解码产物（Request）通过 MPMC 队列投递到 Worker 池。
+
+当前已实现 `TcpConnection` 的固定容量读写缓冲与 owner-loop 状态约束：Reactor 只调用 `OnReadable` 和消费已写字节，Worker 通过 `Send` 回投写任务。socket read/write 注册尚未接入。
 
 ### 2.5 连接状态机
 
@@ -197,8 +215,9 @@ read 缓冲（默认 64KB 可增长） → 解析循环：
 ### 3.2 线程池
 
 - 任务接口：`void submit(Task)`，Task 为可移动的 `std::function`。
-- 内部实现：固定数组 + 条件变量；支持 `steal()` 工作窃取（见 3.4）。
-- 拒绝策略：任务队列满时阻塞（背压）或抛 `QueueFull`（由调用方选择）。
+- 当前实现：固定数量 Worker + 有界 MPMC 全局任务队列 + 条件变量唤醒；`Submit` 在队列满或停止后返回失败，由调用方执行背压。
+- 后续优化：支持 `steal()` 工作窃取（见 3.4），但不得改变有界队列与关闭时排空的语义。
+- 当前拒绝策略：任务队列满或线程池停止时 `Submit` 返回 `false`，由调用方执行背压或返回重试状态。
 - 线程名/亲和性：`pthread_setname_np` + `sched_setaffinity`（Linux）提升缓存局部性。
 
 ### 3.3 无锁 MPMC 环形队列
@@ -243,6 +262,8 @@ Reactor 收到完整帧 ──► MPMC 任务队列 ──► Worker 池
 - 核心数据结构与消息体频繁分配/释放，走池化以降低分配器锁竞争。
 - 每个 Worker 线程独立 Arena，线程退出时回收 → 无跨线程释放竞争。
 - 扩容策略：固定块池不足时倍增扩容，池大小可配置（`memory.pool_size`）。
+
+当前基础实现提供 owner-thread `MemoryPool` 和一次性分配的固定容量 `Buffer`，超限时直接失败以触发上层背压；Slab 分桶和对象复用将在连接管理接入后补齐。
 
 ### 4.2 对象池
 
@@ -296,6 +317,7 @@ Worker ──(Response)──▶ 所属 Sub Reactor 写队列 ──▶ EPOLLOUT
 接口约定（`include/mq/` 头文件为准）：
 
 - 存储层：`StorageEngine`（§4.2 接口：Append/Fetch/CreateTopic/...）。
+- 路由层：`QueueManager` 使用 `shared_mutex` 保护 Topic 元数据；创建为低频独占写，路由与列表为共享读。指定分区必须在范围内，自动路由使用稳定的 FNV-1a key hash。
 - 网络层：`EventLoop` / `TcpServer` / `TcpConnection` / `ProtocolCodec`。
 - 并发层：`ThreadPool` / `MPMCQueue` / `SpscRingBuffer` / `MemoryPool`。
 - 分层规则：上层可调用下层，下层禁止回调上层；跨层只传数据不传对象所有权（除 shared_ptr 生命周期管理）。
