@@ -69,9 +69,9 @@ magic(4, "MQTM") | version(4, 1) | topic_count(4)
 - 记录跨段边界时不拆分：当前段剩余空间 < 单条记录大小时，整条写入下一段。
 - 段内最后一条记录后允许存在**未写完的半条记录**（崩溃窗口），恢复时截断。
 
-### 1.4 稀疏索引（.idx）字节布局
+### 1.4 稀疏索引（.index）字节布局
 
-- 每写入 `kIndexInterval`（默认 4096）条消息追加一条索引项。
+- 每写入 `kIndexInterval`（默认 1000）条消息追加一条索引项。
 - 条目固定 16B：`offset(8) | file_pos(8)`，用 `mmap` 映射，写后 `msync` 按需。
 - 查找流程：二分索引 → 得 (offset, file_pos) 最近前驱 → 顺序扫描段内记录。
 - 索引文件预分配（稀疏 mmap），随段滚动重建。
@@ -116,9 +116,9 @@ Producer 请求 → Worker 线程 → PartitionWriter（per-partition 专用写�
 
 ### 1.8 段滚动与过期清理
 
-- 当前段 ≥ `segment_size`（默认 1GiB）或首条记录时间超出保留窗口 → 滚动新段。
+- 当前段达到 `segment_size`（默认 64MiB）后，下一条完整记录写入新段；文件名为 20 位十进制 offset 段号加 `.log`，每段旁有同名 `.index`。
 - 清理线程（1 个）遍历分区：删除 `end_offset < log_start_offset` 的段，随后更新目录元数据。
-- 清理阈值：按 `retention.ms` / `retention.bytes` / `log_start_offset` 三者最小推进。
+- 后台清理线程按 `retention.ms` 或 `retention.bytes` 删除最老的非活动段，始终保留当前段。
 
 ### 1.9 并发与缓存
 

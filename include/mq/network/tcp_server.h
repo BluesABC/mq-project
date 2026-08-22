@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "mq/network/event_loop.h"
 #include "mq/protocol/commands.h"
@@ -13,6 +14,7 @@ class TcpServer {
  public:
   using RequestHandler = std::function<protocol::Response(const protocol::Request&)>;
   TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler);
+  TcpServer(std::string bind_address, std::uint16_t port, std::size_t worker_count, RequestHandler handler);
   ~TcpServer();
   bool Start();
   void Stop();

@@ -1,6 +1,6 @@
 # mq-project 性能基线报告
 
-> 状态: P0 骨架期占位 · 首次实测填写于 P1 完成后（`bench/` 产出）
+> 状态: P1 实测进行中 · 2026-08-22 更新
 > 基准环境与复现步骤见 §4；数据刷新后更新版本号与日期。
 
 ## 1. 基线摘要
@@ -39,8 +39,40 @@
 
 - 硬件：CPU / 内存 / 磁盘（NVMe SSD）型号与数量。
 - OS：内核版本（epoll / io_uring）。
-- 压测命令：`bench/mq_bench --topic x --threads y --batch z ...`（P1 后补齐参数说明）。
+- 压测命令：`./build/mq_bench produce --topic test --messages 1000000 --size 256 --connections 10 --batch 1000 --partitions 3`。
+- 参数含义：`--connections` 为并发 TCP Producer 数，`--batch` 为单次请求消息数，`--partitions` 为 Topic 分区数；工具启动时会打印实际生效参数。
 - 方法：预热 → 打点 60s → 取稳定区间；每场景跑 3 次取中位数。
+
+### 4.1 Linux 标准基准矩阵
+
+推荐使用仓库脚本自动执行生产矩阵并生成 CSV 原始结果：
+
+```bash
+chmod +x tools/run_bench_matrix.sh
+tools/run_bench_matrix.sh build-linux 1000000 3
+```
+
+脚本要求 Broker 已运行在 `127.0.0.1:9092`，也可通过 `MQ_BENCH_HOST` 和 `MQ_BENCH_PORT` 覆盖；结果写入当前目录 `bench-results-<timestamp>.csv`。CSV 中保留每次运行的完整工具输出，正式填表时取每个场景 3 次的中位数。
+
+推荐使用仓库脚本自动执行生产矩阵并生成 CSV 原始结果：
+
+```bash
+chmod +x tools/run_bench_matrix.sh
+tools/run_bench_matrix.sh build-linux 1000000 3
+```
+
+脚本要求 Broker 已运行在 `127.0.0.1:9092`，也可通过 `MQ_BENCH_HOST` 和 `MQ_BENCH_PORT` 覆盖；结果写入当前目录 `bench-results-<timestamp>.csv`。CSV 中保留每次运行的完整工具输出，正式填表时取每个场景 3 次的中位数。
+
+```bash
+./build/mq_bench produce --topic bench_256 --messages 1000000 --size 256 --connections 1 --batch 1 --partitions 3
+./build/mq_bench produce --topic bench_256 --messages 1000000 --size 256 --connections 1 --batch 100 --partitions 3
+./build/mq_bench produce --topic bench_256 --messages 1000000 --size 256 --connections 1 --batch 1000 --partitions 3
+./build/mq_bench produce --topic bench_256_c10 --messages 1000000 --size 256 --connections 10 --batch 1000 --partitions 3
+./build/mq_bench produce --topic bench_4k_c10 --messages 100000 --size 4096 --connections 10 --batch 1000 --partitions 3
+./build/mq_bench consume --topic <retained_topic> --messages 1000000 --connections 3 --partitions 3 --group bench_group
+```
+
+截图中的 Linux 结果（旧版工具未实现 `--connections`，因此仅作为单连接参考）为：256 B 约 69,786 TPS；4096 B 约 13,100 TPS。修复后的标准矩阵结果应在此表中按机器、内核、CPU、内存、磁盘和运行次数补录。
 
 ## 5. 回归判定
 

@@ -40,11 +40,15 @@ cmake --install build --prefix /opt/mq
 | `listen.address` | `0.0.0.0` | 监听地址 |
 | `listen.port` | `9092` | 监听端口 |
 | `data_dir` | `/var/lib/mq` | 数据目录（禁止共用 NFS） |
-| `threads.reactor` | CPU 核数 | Sub Reactor 线程数 |
+| `threads.reactor` | CPU 核数（自动模式上限 32） | Sub Reactor 线程数 |
 | `threads.worker` | CPU 核数 × 2 | Worker 线程数 |
-| `storage.segment_size` | `1GiB` | 段文件大小 |
-| `storage.fsync_policy` | `every_n_ms` | `every_msg` / `every_n_ms` / `every_n_bytes` |
+| `storage.segment_size` | `64MiB` | 段文件大小 |
+| `storage.index_interval` | `1000` | 每写入多少条消息追加一条稀疏索引 |
+| `storage.fsync_policy` | `per_batch` | `per-message` / `per-batch` / `interval` |
 | `storage.fsync_interval_ms` | `5` | 定时 fsync 间隔 |
+| `storage.retention_ms` | `7d` | 按消息时间清理段 |
+| `storage.retention_bytes` | `1GiB` | 按总段大小清理段 |
+| `storage.cleaner_interval_ms` | `1000` | 后台清理扫描周期 |
 | `storage.retention_ms` | `7d` | 消息保留时长（TTL） |
 | `network.max_connections` | `50000` | 最大连接数 |
 | `network.buffer_limit` | `8MB` | 单连接读写缓冲上限 |
@@ -62,6 +66,10 @@ cmake --install build --prefix /opt/mq
 systemctl start mq-broker
 systemctl stop mq-broker     # SIGTERM：flush + 安全退出
 ```
+
+Broker 当前支持 INI 配置文件，示例见 `conf/broker.conf`。启动入口会加载监听地址/端口、数据目录、Sub Reactor 数量、段大小和保留时长；收到 SIGTERM/SIGINT 后停止接收连接、停止 Reactor、刷新 WAL 后退出。
+
+消费者位点保存在 `data/metadata/consumer_offsets.meta`，采用临时文件加原子替换，与 Topic 元数据快照一致。
 
 - 优雅停机：接收 SIGTERM → 停止 accept → 停止 Worker → flush 写缓冲 + fsync → 关闭段文件 → 退出。
 - 强制终止（kill -9）安全：恢复时截断未写完记录（见 `docs/design-details.md` §1.7）。

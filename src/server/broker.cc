@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <sstream>
 
 #include "mq/core/logger.h"
 
@@ -50,11 +52,16 @@ std::uint64_t Get64(std::string_view input, std::size_t position) {
   }
   return value;
 }
+std::string IdempotencyKey(std::uint64_t producer_id, std::uint64_t sequence) {
+  return std::to_string(producer_id) + ":" + std::to_string(sequence);
+}
 
 }  // namespace
 
-Broker::Broker(std::filesystem::path data_dir)
-    : storage_(data_dir), metadata_store_(data_dir / "metadata" / "topics.meta") {}
+Broker::Broker(std::filesystem::path data_dir) : Broker(std::move(data_dir), core::StorageConfig{}) {}
+Broker::Broker(std::filesystem::path data_dir, core::StorageConfig storage_config)
+    : storage_(data_dir, storage_config), metadata_store_(data_dir / "metadata" / "topics.meta"),
+      offset_store_(data_dir / "metadata" / "consumer_offsets.meta"), storage_config_(storage_config) {}
 
 bool Broker::Open(std::string* error) {
   if (opened_) return true;
@@ -64,6 +71,7 @@ bool Broker::Open(std::string* error) {
   }
   std::vector<core::TopicMetadata> topics;
   if (!metadata_store_.Load(&topics, error) || !queues_.ReplaceTopics(std::move(topics), error)) return false;
+  if (!offset_store_.Load(&consumer_offsets_, error)) return false;
   opened_ = true;
   core::Logger::Instance().Log(core::LogLevel::kInfo, "broker storage initialized");
   return true;
@@ -83,11 +91,48 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
       return HandleDeleteTopic(request);
     case protocol::Command::kProduce:
       return HandleProduce(request);
+    case protocol::Command::kProduceBatch:
+      return HandleProduceBatch(request);
     case protocol::Command::kFetch:
       return HandleFetch(request);
+    case protocol::Command::kCommitOffset:
+      return HandleCommitOffset(request);
+    case protocol::Command::kHeartbeat:
+      return HandleHeartbeat(request);
     default:
       return MakeResponse(request, protocol::Status::kBadRequest);
   }
+}
+
+bool Broker::Flush(std::string* error) {
+  return storage_.Flush(error);
+}
+
+protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
+  if (!request.payload.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
+  std::string error;
+  if (!storage_.Flush(&error)) return MakeResponse(request, protocol::Status::kStorageError);
+  return MakeResponse(request, protocol::Status::kOk);
+}
+
+protocol::Response Broker::HandleCommitOffset(const protocol::Request& request) {
+  std::string_view payload = request.payload; std::size_t position = 0;
+  if (!Take(payload, &position, 2)) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto group_size = Get16(payload, 0); const std::size_t group_position = position;
+  if (!Take(payload, &position, group_size) || !Take(payload, &position, 4) || !Take(payload, &position, 8) || position != payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto partition = Get32(payload, group_position + group_size); const auto offset = Get64(payload, group_position + group_size + 4);
+  if (group_size == 0 || request.topic.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
+  std::uint32_t resolved_partition = 0; std::string route_error;
+  if (!queues_.ResolvePartition(request.topic, partition, "", &resolved_partition, &route_error)) {
+    return MakeResponse(request, route_error == "unknown topic" ? protocol::Status::kUnknownTopic : protocol::Status::kInvalidOffset);
+  }
+  std::lock_guard<std::mutex> lock(topic_metadata_mutex_);
+  const std::string group(payload.substr(group_position, group_size));
+  auto it = std::find_if(consumer_offsets_.begin(), consumer_offsets_.end(), [&](const core::ConsumerOffset& item) { return item.group == group && item.topic == request.topic && item.partition == partition; });
+  if (it == consumer_offsets_.end()) consumer_offsets_.push_back({group, request.topic, partition, offset}); else it->offset = offset;
+  std::string error;
+  if (!offset_store_.Save(consumer_offsets_, &error)) return MakeResponse(request, protocol::Status::kStorageError);
+  return MakeResponse(request, protocol::Status::kOk);
 }
 
 protocol::Response Broker::HandleCreateTopic(const protocol::Request& request) {
@@ -137,12 +182,23 @@ protocol::Response Broker::HandleListTopic(const protocol::Request& request) {
 }
 
 protocol::Response Broker::HandleProduce(const protocol::Request& request) {
+  if ((request.flags & protocol::kAckMask) == protocol::kAckAll) return MakeResponse(request, protocol::Status::kNotSupported);
   std::string_view payload = request.payload;
   std::size_t position = 0;
+  std::uint64_t producer_id = 0, sequence = 0;
+  const bool has_metadata = (request.flags & protocol::kFlagProducerMetadata) != 0;
+  if (has_metadata) {
+    if (!Take(payload, &position, 16)) return MakeResponse(request, protocol::Status::kBadRequest);
+    producer_id = Get64(payload, 0); sequence = Get64(payload, 8);
+    std::lock_guard<std::mutex> lock(idempotency_mutex_);
+    const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, sequence));
+    if (it != idempotency_cache_.end()) return it->second;
+  }
+  if (position + 4 > payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  const std::uint32_t requested_partition = Get32(payload, position);
   if (!Take(payload, &position, 4)) return MakeResponse(request, protocol::Status::kBadRequest);
-  const std::uint32_t requested_partition = Get32(payload, 0);
   if (!Take(payload, &position, 2)) return MakeResponse(request, protocol::Status::kBadRequest);
-  const std::uint16_t key_length = Get16(payload, 4);
+  const std::uint16_t key_length = Get16(payload, position - 2);
   const std::size_t key_position = position;
   if (!Take(payload, &position, key_length) || !Take(payload, &position, 4)) {
     return MakeResponse(request, protocol::Status::kBadRequest);
@@ -167,6 +223,37 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request) {
   std::string response_payload;
   Put32(&response_payload, partition);
   Put64(&response_payload, message.offset);
+  auto response = MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
+  if (has_metadata) { std::lock_guard<std::mutex> lock(idempotency_mutex_); idempotency_cache_[IdempotencyKey(producer_id, sequence)] = response; }
+  return response;
+}
+
+protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) {
+  if ((request.flags & protocol::kAckMask) == protocol::kAckAll || !(request.flags & protocol::kFlagProducerMetadata)) return MakeResponse(request, protocol::Status::kNotSupported);
+  std::string_view payload = request.payload; std::size_t position = 0;
+  if (!Take(payload, &position, 20)) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto producer_id = Get64(payload, 0); const auto first_sequence = Get64(payload, 8); const auto count = Get32(payload, 16);
+  if (count == 0 || count > 10000) return MakeResponse(request, protocol::Status::kBadRequest);
+  std::vector<protocol::Response> cached(count); std::vector<bool> is_cached(count, false);
+  {
+    std::lock_guard<std::mutex> lock(idempotency_mutex_);
+    for (std::uint32_t i = 0; i < count; ++i) { const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, first_sequence + i)); if (it != idempotency_cache_.end()) { cached[i] = it->second; is_cached[i] = true; } }
+  }
+  std::string response_payload; Put32(&response_payload, count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if (!Take(payload, &position, 2)) return MakeResponse(request, protocol::Status::kBadRequest);
+    const auto key_size = Get16(payload, position - 2); const auto key_position = position;
+    if (!Take(payload, &position, key_size) || !Take(payload, &position, 4)) return MakeResponse(request, protocol::Status::kBadRequest);
+    const auto value_size = Get32(payload, position - 4); const auto value_position = position;
+    if (!Take(payload, &position, value_size)) return MakeResponse(request, protocol::Status::kBadRequest);
+    if (is_cached[i]) { if (cached[i].payload.size() != 12) return MakeResponse(request, protocol::Status::kInternalError); response_payload.append(cached[i].payload); continue; }
+    protocol::Request single = request; single.command = protocol::Command::kProduce; single.flags = (request.flags & ~protocol::kFlagProducerMetadata) | protocol::kFlagProducerMetadata;
+    std::string single_payload; Put64(&single_payload, producer_id); Put64(&single_payload, first_sequence + i); Put32(&single_payload, 0xFFFFFFFFu); Put16(&single_payload, key_size); single_payload.append(payload.substr(key_position, key_size)); Put32(&single_payload, value_size); single_payload.append(payload.substr(value_position, value_size)); single.payload = std::move(single_payload);
+    const auto result = HandleProduce(single);
+    if (result.status != protocol::Status::kOk) return MakeResponse(request, result.status);
+    response_payload.append(result.payload);
+  }
+  if (position != payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
   return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
 }
 

@@ -21,10 +21,20 @@ ctest --test-dir build --output-on-failure
 ## 3. 单元测试用例（骨架期规划）
 
 ### 3.1 存储引擎 `storage_engine_test`
-- [ ] 追加/读取往返一致（含跨段回卷）
+- [x] 追加/读取往返一致（含跨段回卷）
 - [ ] CRC 损坏检测
 - [ ] 崩溃恢复（截断半条记录）
-- [ ] 稀疏索引定位正确性
+- [x] 稀疏索引定位正确性
+- [x] 段滚动、按大小保留清理与跨段读取
+
+### 3.7 客户端 SDK `client_test`
+- [x] Producer/Consumer 回环连接、批量生产和消费提交
+- [x] Producer metadata sequence 与 Broker 幂等响应
+- [x] ack=0 / ack=1 / ack=all 语义
+
+### 5.1 性能与 sanitizer
+- [ ] Linux 标准矩阵：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区
+- [ ] Linux ASan/UBSan 构建并运行全量 CTest
 
 ### 3.2 编解码 `codec_test`
 - [ ] 请求/响应帧编解码往返
@@ -56,7 +66,7 @@ ctest --test-dir build --output-on-failure
 - [x] 验证创建 Topic 后生成 `data/metadata/topics.meta` 快照
 
 ### 4.1 TCP 回环集成 `tcp_integration_test`
-- [x] 100 个并发连接通过非阻塞 Winsock 服务正确收发协议帧
+- [x] 1000 个并发连接通过 Reactor 服务正确收发协议帧（Linux epoll / Windows select）
 
 ## 4. 集成测试用例（P1 起）
 

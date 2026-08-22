@@ -109,6 +109,27 @@ mq::protocol::Request FetchRequest(std::uint64_t request_id, std::uint32_t parti
   return request;
 }
 
+mq::protocol::Request CommitRequest(std::uint64_t request_id, std::string group,
+                                    std::uint32_t partition, std::uint64_t offset) {
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kCommitOffset;
+  request.request_id = request_id;
+  request.topic = "orders";
+  Put16(&request.payload, static_cast<std::uint16_t>(group.size()));
+  request.payload.append(group);
+  Put32(&request.payload, partition);
+  Put64(&request.payload, offset);
+  return request;
+}
+
+mq::protocol::Request IdempotentProduceRequest(std::uint64_t request_id) {
+  auto request = ProduceRequest(request_id, "idem", "once");
+  request.flags = mq::protocol::kFlagProducerMetadata | mq::protocol::kAckOne;
+  std::string metadata;
+  Put64(&metadata, 99); Put64(&metadata, 7); metadata.append(request.payload); request.payload = std::move(metadata);
+  return request;
+}
+
 void CreateProduceFetch() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_broker_test";
   std::error_code error;
@@ -133,6 +154,12 @@ void CreateProduceFetch() {
   assert(fetched.status == mq::protocol::Status::kOk);
   assert(Get32(fetched.payload, 0) == 1);
   assert(Get64(fetched.payload, 4) == 0);
+  const auto idem = broker.Handle(IdempotentProduceRequest(6));
+  const auto duplicate_idem = broker.Handle(IdempotentProduceRequest(7));
+  assert(idem.status == mq::protocol::Status::kOk && duplicate_idem.status == mq::protocol::Status::kOk);
+  assert(idem.payload == duplicate_idem.payload);
+  assert(broker.Handle(CommitRequest(5, "consumer-a", partition, 1)).status == mq::protocol::Status::kOk);
+  assert(std::filesystem::exists(root / "metadata" / "consumer_offsets.meta"));
   std::filesystem::remove_all(root, error);
 }
 

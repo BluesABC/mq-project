@@ -72,11 +72,44 @@ void StorageRoundTrip() {
   std::filesystem::remove_all(root, ec);
 }
 
+void SegmentsIndexesAndRetention() {
+  const auto root = std::filesystem::temp_directory_path() / "mq_project_segment_test";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  mq::core::StorageConfig config;
+  config.segment_size_bytes = 128;
+  config.index_interval = 2;
+  config.retention_bytes = 1;
+  config.cleaner_interval_ms = 60000;
+  {
+    mq::core::StorageEngine storage(root, config);
+    assert(storage.Open());
+    mq::core::Message message;
+    for (int index = 0; index < 12; ++index) {
+      assert(storage.Append("orders", 0, "k", std::string(40, static_cast<char>('a' + index)), &message));
+    }
+    assert(std::filesystem::exists(root / "queues" / "6f7264657273" / "0" /
+                                    "00000000000000000001.log"));
+    assert(std::filesystem::exists(root / "queues" / "6f7264657273" / "0" /
+                                    "00000000000000000000.index"));
+    std::vector<mq::core::Message> messages;
+    assert(storage.Read("orders", 0, 8, 1000, &messages));
+    assert(messages.size() == 4 && messages.front().offset == 8 && messages.back().offset == 11);
+    assert(storage.CleanupExpiredSegments());
+    std::size_t log_count = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(root / "queues" / "6f7264657273" / "0"))
+      if (entry.path().extension() == ".log") ++log_count;
+    assert(log_count == 1);
+  }
+  std::filesystem::remove_all(root, ec);
+}
+
 }  // namespace
 
 int main() {
   ProtocolRoundTrip();
   RequestStreamDecoding();
   StorageRoundTrip();
+  SegmentsIndexesAndRetention();
   return 0;
 }

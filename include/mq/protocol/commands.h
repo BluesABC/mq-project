@@ -14,6 +14,7 @@ enum class Command : std::uint8_t {
   kDeleteTopic = 0x02,
   kListTopic = 0x03,
   kProduce = 0x10,
+  kProduceBatch = 0x11,
   kFetch = 0x20,
   kCommitOffset = 0x21,
   kHeartbeat = 0x30,
@@ -27,8 +28,15 @@ enum class Status : std::uint8_t {
   kInvalidOffset = 0x13,
   kStorageError = 0x14,
   kVersionMismatch = 0x15,
+  kNotSupported = 0x16,
   kInternalError = 0x20,
 };
+
+constexpr std::uint16_t kAckMask = 0x0003;
+constexpr std::uint16_t kAckZero = 0x0000;
+constexpr std::uint16_t kAckOne = 0x0001;
+constexpr std::uint16_t kAckAll = 0x0002;
+constexpr std::uint16_t kFlagProducerMetadata = 0x0004;
 
 struct Request {
   std::uint8_t version = kCurrentVersion;

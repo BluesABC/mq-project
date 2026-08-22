@@ -8,8 +8,17 @@ namespace mq::core {
 ThreadPool::ThreadPool(std::size_t worker_count, std::size_t queue_capacity) : queue_(queue_capacity) {
   if (worker_count == 0) throw std::invalid_argument("worker_count must be positive");
   workers_.reserve(worker_count);
-  for (std::size_t index = 0; index < worker_count; ++index) {
-    workers_.emplace_back(&ThreadPool::RunWorker, this);
+  try {
+    for (std::size_t index = 0; index < worker_count; ++index) {
+      workers_.emplace_back(&ThreadPool::RunWorker, this);
+    }
+  } catch (...) {
+    stopping_.store(true, std::memory_order_release);
+    wait_condition_.notify_all();
+    for (auto& worker : workers_) {
+      if (worker.joinable()) worker.join();
+    }
+    throw;
   }
 }
 
@@ -37,6 +46,7 @@ void ThreadPool::Shutdown() {
 }
 
 void ThreadPool::RunWorker() {
+  try {
   for (;;) {
     Task task;
     if (queue_.TryDequeue(&task)) {
@@ -57,6 +67,9 @@ void ThreadPool::RunWorker() {
         queued_tasks_.load(std::memory_order_acquire) == 0) {
       return;
     }
+  }
+  } catch (...) {
+    // A worker must never terminate the process because of a task or wait error.
   }
 }
 

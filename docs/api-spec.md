@@ -60,6 +60,10 @@
 | `PRODUCE` | `partition(4) | key_len(2) | key | value_len(4) | value`；`partition=0xFFFFFFFF` 表示按 key 路由 | `partition(4) | offset(8)` |
 | `FETCH` | `partition(4) | offset(8) | max_bytes(4)` | `count(4)`，重复 `offset(8) | timestamp_ms(8) | key_len(2) | key | value_len(4) | value` |
 
+`COMMIT_OFFSET` 请求载荷为 `group_len(2) | group | partition(4) | offset(8)`，Topic 取请求帧中的 `topic` 字段；`HEARTBEAT` 请求载荷为空，成功返回空载荷。
+
+`PRODUCE` 的 SDK 扩展请求在 flags 设置 `PRODUCER_METADATA` 时，载荷前置 `producer_id(8) | sequence(8)`；Broker 按二元组去重并缓存响应。`PRODUCE_BATCH`（0x11）载荷为 `producer_id(8) | first_sequence(8) | count(4)`，后接重复的 `key_len(2) | key | value_len(4) | value`。ack flags：0 为 ack=0，1 为 ack=1，2 为 ack=all；当前 ack=all 返回 `NOT_SUPPORTED`。
+
 - `PRODUCE` 的 `key_len` 最大为 65535，`value_len` 范围为 1~1048576。
 - `FETCH` 的 `max_bytes` 必须大于 0；若起始 offset 超出已提交范围，返回 `INVALID_OFFSET`。
 - 当前 P1 实现只支持 `ack=1` 的本地写入确认；`ack=0` 和 `ack=all` 保留给复制模块。
@@ -75,6 +79,7 @@
 | 0x13 | INVALID_OFFSET |
 | 0x14 | STORAGE_ERROR |
 | 0x15 | VERSION_MISMATCH |
+| 0x16 | NOT_SUPPORTED |
 | 0x20 | INTERNAL_ERROR |
 
 ## 4.1 版本协商
