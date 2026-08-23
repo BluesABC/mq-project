@@ -133,7 +133,7 @@ offset 为全局递增逻辑偏移（相对 partition 首条消息，从 0 开�
 - **主从复制**：Producer 只写 Leader；Follower 定时从 Leader 拉取日志段增量，追加到本地存储。
 - **提交语义**：`PRODUCE` 的 ack 时机支持 `ack=0 / ack=1 / ack=all` 三档。
 - **故障切换**：基于元数据服务/一致性算法选主，切换后消费位点从 `log_start_offset` 恢复。
-- P2 首步已实现 `ReplicationCoordinator`：维护本节点/副本角色、心跳健康状态、复制 offset、quorum 判断和确定性选主。网络复制传输、日志增量拉取和自动故障切换仍待接入该状态层。
+- P2 已实现 `ReplicationCoordinator`、TCP `ReplicationClient`、内部复制 Fetch/Append、周期增量拉取、复制心跳和 quorum ack。当前选主为确定性健康节点选择，尚未达到 Raft/ZAB 的任期、多数派日志提交和网络分区安全保证。
 
 ## 7. 模块接口（骨架）
 

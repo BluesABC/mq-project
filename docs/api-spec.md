@@ -68,7 +68,7 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 
 - `PRODUCE` 的 `key_len` 最大为 65535，`value_len` 范围为 1~1048576。
 - `FETCH` 的 `max_bytes` 必须大于 0；若起始 offset 超出已提交范围，返回 `INVALID_OFFSET`。
-- P1 实现只支持 `ack=1` 的本地写入确认；P2 复制协调器定义副本确认所需的 quorum，但真实跨节点传输接入前 `ack=all` 仍返回 `NOT_SUPPORTED`。
+- P1 默认使用本地 `ack=1`；P2 配置副本 peer 后，`ack=all` 等待本地写入和配置 quorum 的同步副本确认，副本不可达时返回 `STORAGE_ERROR`。
 
 ## 4. 状态码（Status 枚举）
 

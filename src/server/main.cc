@@ -23,6 +23,9 @@ struct Config {
   std::uint64_t segment_size = 64ULL * 1024 * 1024;
   std::uint64_t retention_hours = 168;
   std::filesystem::path log_file;
+  std::string node_id = "node-local";
+  bool replica_follower = false;
+  std::vector<mq::server::ReplicationPeer> replica_peers;
 };
 std::string Trim(std::string value) { const auto first = value.find_first_not_of(" \t\r\n"); if (first == std::string::npos) return {}; const auto last = value.find_last_not_of(" \t\r\n"); return value.substr(first, last - first + 1); }
 bool Number(const std::string& text, std::uint64_t* value) { try { std::size_t used = 0; *value = std::stoull(text, &used, 0); return used == text.size(); } catch (...) { return false; } }
@@ -47,6 +50,19 @@ bool LoadConfig(const std::filesystem::path& path, Config* config, std::string* 
     else if (key == "segment_size" && ParseSize(value, &config->segment_size)) {}
     else if (key == "retention_hours" && Number(value, &config->retention_hours)) {}
     else if (key == "log_file") config->log_file = value;
+    else if (key == "node_id") config->node_id = value;
+    else if (key == "replica_role") config->replica_follower = value == "follower";
+    else if (key == "replica_peers") {
+      std::size_t begin = 0;
+      while (begin < value.size()) {
+        const auto end = value.find(';', begin); const auto item = value.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        const auto first = item.find(':'); const auto second = first == std::string::npos ? std::string::npos : item.find(':', first + 1);
+        if (first == std::string::npos || second == std::string::npos) { if (error) *error = "invalid replica_peers"; return false; }
+        std::uint64_t port = 0; if (!Number(item.substr(second + 1), &port) || port > 65535) { if (error) *error = "invalid replica port"; return false; }
+        config->replica_peers.push_back({item.substr(0, first), item.substr(first + 1, second - first - 1), static_cast<std::uint16_t>(port), config->replica_follower});
+        begin = end == std::string::npos ? value.size() : end + 1;
+      }
+    }
     else { if (error) *error = "invalid config value for " + key; return false; }
   }
   return true;
@@ -66,11 +82,14 @@ int main(int argc, char** argv) {
   mq::core::StorageConfig storage_config; storage_config.segment_size_bytes = config.segment_size; storage_config.retention_ms = config.retention_hours * 60ULL * 60 * 1000;
   mq::server::Broker broker(config.data_dir, storage_config);
   if (!broker.Open(&error)) { logger.Log(mq::core::LogLevel::kCritical, error); return 1; }
+  broker.ConfigureReplication(config.node_id, config.replica_peers, 0, config.replica_follower);
+  broker.StartReplication();
   mq::network::TcpServer server(config.bind_address, config.bind_port, config.sub_reactor_threads, [&broker](const mq::protocol::Request& request) { return broker.Handle(request); });
   if (!server.Start()) { logger.Log(mq::core::LogLevel::kCritical, "cannot start broker server"); return 1; }
   logger.Log(mq::core::LogLevel::kInfo, "broker listening on " + config.bind_address + ":" + std::to_string(server.port()));
   while (!g_stop.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(100));
   server.Stop();
+  broker.StopReplication();
   if (!broker.Flush(&error)) { logger.Log(mq::core::LogLevel::kError, error); return 1; }
   logger.Log(mq::core::LogLevel::kInfo, "broker stopped"); logger.CloseFile(); return 0;
   } catch (const std::exception& exception) {

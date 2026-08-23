@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
+#include <atomic>
+#include <condition_variable>
+#include <thread>
 
 #include "mq/core/queue_manager.h"
 #include "mq/core/consumer_offset_store.h"
@@ -14,12 +18,24 @@
 
 namespace mq::server {
 
+struct ReplicationPeer {
+  std::string node_id;
+  std::string host;
+  std::uint16_t port = 0;
+  bool leader = false;
+};
+
 class Broker {
  public:
   explicit Broker(std::filesystem::path data_dir);
   Broker(std::filesystem::path data_dir, core::StorageConfig storage_config);
+  ~Broker();
 
   bool Open(std::string* error = nullptr);
+  void ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers,
+                            std::size_t quorum = 0, bool follower = false);
+  void StartReplication();
+  void StopReplication();
   bool Flush(std::string* error = nullptr);
   protocol::Response Handle(const protocol::Request& request);
 
@@ -36,6 +52,7 @@ class Broker {
   protocol::Response HandleReplicaAppend(const protocol::Request& request);
   protocol::Response MakeResponse(const protocol::Request& request, protocol::Status status,
                                   std::string payload = {}) const;
+  bool Replicate(const std::string& topic, std::uint32_t partition, const core::Message& message);
 
   core::StorageEngine storage_;
   core::TopicMetadataStore metadata_store_;
@@ -47,6 +64,17 @@ class Broker {
   bool opened_ = false;
   std::mutex idempotency_mutex_;
   std::unordered_map<std::string, protocol::Response> idempotency_cache_;
+  std::string node_id_ = "node-local";
+  std::vector<ReplicationPeer> replication_peers_;
+  std::size_t replication_quorum_ = 0;
+  std::unique_ptr<class ReplicationCoordinator> replication_coordinator_;
+  bool follower_ = false;
+  std::atomic<bool> stop_replication_{false};
+  std::condition_variable replication_cv_;
+  std::mutex replication_mutex_;
+  std::thread replication_thread_;
+  std::unordered_map<std::string, std::uint64_t> replication_offsets_;
+  void ReplicationLoop();
 };
 
 }  // namespace mq::server
