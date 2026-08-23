@@ -50,20 +50,26 @@ void SetTimeout(Socket socket, std::uint32_t timeout_ms) {
 }
 
 struct MqProducer::Impl {
-  Socket socket = kInvalidSocket; std::string host; std::uint16_t port = 0; std::uint32_t timeout_ms = 5000; std::uint64_t request_id = 1; std::uint64_t producer_id = 0; std::uint64_t sequence = 0; std::chrono::milliseconds backoff{100}; std::string error;
+  Socket socket = kInvalidSocket; std::string host; std::uint16_t port = 0; std::vector<std::pair<std::string, std::uint16_t>> endpoints; std::size_t endpoint_index = 0; std::uint32_t timeout_ms = 5000; std::uint64_t request_id = 1; std::uint64_t producer_id = 0; std::uint64_t sequence = 0; std::chrono::milliseconds backoff{100}; std::string error;
   Impl() { producer_id = static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()); }
   ~Impl() { Close(); }
   void Close() { if (socket != kInvalidSocket) { CloseSocket(socket); socket = kInvalidSocket; } }
   bool Connect() {
     if (socket != kInvalidSocket) return true;
+    if (endpoints.empty() && !host.empty()) endpoints.emplace_back(host, port);
+    if (endpoints.empty()) return false;
 #ifdef _WIN32
     static bool initialized = false; if (!initialized) { WSADATA data{}; if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return false; initialized = true; }
 #endif
-    socket = ::socket(AF_INET, SOCK_STREAM, 0); if (socket == kInvalidSocket) return false;
-    addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; addrinfo* result = nullptr;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0 || result == nullptr) { Close(); return false; }
-    SetTimeout(socket, timeout_ms); const bool connected = ::connect(socket, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0; freeaddrinfo(result);
-    if (!connected) { Close(); return false; } return true;
+    for (std::size_t attempt = 0; attempt < endpoints.size(); ++attempt) {
+      const auto index = (endpoint_index + attempt) % endpoints.size(); host = endpoints[index].first; port = endpoints[index].second;
+      socket = ::socket(AF_INET, SOCK_STREAM, 0); if (socket == kInvalidSocket) continue;
+      addrinfo hints{}; hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM; addrinfo* result = nullptr;
+      if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0 || result == nullptr) { Close(); continue; }
+      SetTimeout(socket, timeout_ms); const bool connected = ::connect(socket, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0; freeaddrinfo(result);
+      if (connected) { endpoint_index = index; return true; } Close();
+    }
+    endpoint_index = (endpoint_index + 1) % endpoints.size(); return false;
   }
   bool Call(mq::protocol::Request request, mq::protocol::Response* response) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -71,7 +77,17 @@ struct MqProducer::Impl {
       if (!Connect()) { std::this_thread::sleep_for(backoff); const auto doubled = backoff * 2; backoff = doubled < std::chrono::milliseconds(30000) ? doubled : std::chrono::milliseconds(30000); continue; }
       request.request_id = request_id++;
       std::string frame; if (mq::protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAll(socket, frame)) {
-        char header[18]; if (ReceiveAll(socket, header, sizeof(header))) { const auto payload_size = Get32(std::string_view(header, sizeof(header)), 14); std::string full(header, sizeof(header)); full.resize(18 + payload_size); if (ReceiveAll(socket, full.data() + 18, payload_size) && mq::protocol::ProtocolCodec::DecodeResponse(full, response, &error)) { backoff = std::chrono::milliseconds(100); return true; } }
+        char header[18]; if (ReceiveAll(socket, header, sizeof(header))) {
+          const auto payload_size = Get32(std::string_view(header, sizeof(header)), 14);
+          if (payload_size > mq::protocol::kMaxPayloadBytes) { error = "response payload too large"; Close(); continue; }
+          std::string full(header, sizeof(header)); full.resize(18 + payload_size);
+          if (ReceiveAll(socket, full.data() + 18, payload_size) && mq::protocol::ProtocolCodec::DecodeResponse(full, response, &error)) {
+            if (response->status == mq::protocol::Status::kNotLeader && endpoints.size() > 1) {
+              Close(); endpoint_index = (endpoint_index + 1) % endpoints.size(); continue;
+            }
+            backoff = std::chrono::milliseconds(100); return true;
+          }
+        }
       }
       Close();
     }
@@ -85,6 +101,7 @@ struct MqProducer::Impl {
 MqProducer::MqProducer() : impl_(std::make_unique<Impl>()) {}
 MqProducer::~MqProducer() = default;
 bool MqProducer::connect(const std::string& host, std::uint16_t port) { impl_->host = host; impl_->port = port; impl_->Close(); return impl_->Connect(); }
+bool MqProducer::connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints) { if (endpoints.empty()) return false; impl_->endpoints = endpoints; impl_->endpoint_index = 0; impl_->Close(); return impl_->Connect(); }
 bool MqProducer::createTopic(const std::string& name, std::uint32_t partitions) { mq::protocol::Request request; request.command = mq::protocol::Command::kCreateTopic; request.topic = name; Put32(&request.payload, partitions); mq::protocol::Response response; return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk; }
 bool MqProducer::produce(const std::string& topic, const std::string& key, const std::string& value) { return produce(topic, key, value, AckMode::kOne, nullptr); }
 bool MqProducer::produce(const std::string& topic, const std::string& key, const std::string& value, AckMode ack, ProduceResult* result) {
@@ -111,6 +128,7 @@ struct MqConsumer::Impl : MqProducer::Impl {
 MqConsumer::MqConsumer() : impl_(std::make_unique<Impl>()) {}
 MqConsumer::~MqConsumer() = default;
 bool MqConsumer::connect(const std::string& host, std::uint16_t port) { impl_->host = host; impl_->port = port; impl_->Close(); return impl_->Connect(); }
+bool MqConsumer::connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints) { if (endpoints.empty()) return false; impl_->endpoints = endpoints; impl_->endpoint_index = 0; impl_->Close(); return impl_->Connect(); }
 bool MqConsumer::subscribe(const std::string& topic, const std::string& group) { return subscribe(topic, group, 0); }
 bool MqConsumer::subscribe(const std::string& topic, const std::string& group, std::uint32_t partition) { impl_->topic = topic; impl_->group = group; impl_->partition = partition; impl_->next_offset = 0; return !topic.empty() && !group.empty(); }
 std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) { mq::protocol::Request request; request.command = mq::protocol::Command::kFetch; request.topic = impl_->topic; Put32(&request.payload, impl_->partition); Put64(&request.payload, impl_->next_offset); Put32(&request.payload, 1024 * 1024); const auto old = impl_->timeout_ms; impl_->timeout_ms = timeout_ms == 0 ? old : timeout_ms; mq::protocol::Response response; const bool okay = impl_->Call(request, &response); impl_->timeout_ms = old; if (!okay || response.status != mq::protocol::Status::kOk || response.payload.size() < 4 || Get32(response.payload, 0) == 0) return std::nullopt; std::size_t pos = 4; if (pos + 18 > response.payload.size()) return std::nullopt; core::Message message; message.offset = Get64(response.payload, pos); message.timestamp_ms = static_cast<std::int64_t>(Get64(response.payload, pos + 8)); pos += 16; const auto key_size = Get16(response.payload, pos); pos += 2; if (pos + key_size + 4 > response.payload.size()) return std::nullopt; message.key.assign(response.payload, pos, key_size); pos += key_size; const auto value_size = Get32(response.payload, pos); pos += 4; if (pos + value_size > response.payload.size()) return std::nullopt; message.value.assign(response.payload, pos, value_size); impl_->next_offset = message.offset + 1; return message; }

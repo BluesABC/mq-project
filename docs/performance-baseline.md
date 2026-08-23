@@ -1,6 +1,6 @@
 # mq-project 性能基线报告
 
-> 状态: P1 实测进行中 · 2026-08-22 更新
+> 状态: P2 Linux 验证完成，标准矩阵待补 · 2026-08-24 更新
 > 基准环境与复现步骤见 §4；数据刷新后更新版本号与日期。
 
 ## 1. 基线摘要
@@ -42,6 +42,14 @@
 - 压测命令：`./build/mq_bench produce --topic test --messages 1000000 --size 256 --connections 10 --batch 1000 --partitions 3`。
 - 参数含义：`--connections` 为并发 TCP Producer 数，`--batch` 为单次请求消息数，`--partitions` 为 Topic 分区数；工具启动时会打印实际生效参数。
 - 方法：预热 → 打点 60s → 取稳定区间；每场景跑 3 次取中位数。
+
+### 4.2 WSL2 验证记录
+
+- 环境：WSL2 Ubuntu，Linux 5.10.16.3-microsoft-standard-WSL2，GCC 13.3.0。
+- 普通 Debug 构建、ASan/UBSan 构建均通过。
+- 普通 CTest：10/10 通过；ASan/UBSan CTest：10/10 通过。
+- TCP 冒烟：1000 条消息、2 个连接、batch=100、3 个分区，TPS 2824.74；Broker 收到 SIGINT 后正常退出。
+- 该结果用于 Linux 功能验证，不作为正式性能基线；正式基线仍需按下方矩阵记录硬件、磁盘和重复轮次。
 
 ### 4.1 Linux 标准基准矩阵
 

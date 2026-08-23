@@ -19,5 +19,21 @@ int main() {
   assert(producer.produceBatch("client", batch, mq::client::AckMode::kOne, &results)); assert(results.size() == 2 && results[0].offset == 1 && results[1].offset == 2);
   mq::client::MqConsumer consumer; assert(consumer.connect("localhost", server.port())); assert(consumer.subscribe("client", "group"));
   auto first = consumer.poll(); assert(first.has_value() && first->value == "one"); assert(consumer.commit(1));
+  const auto follower_root = root / "endpoint-follower";
+  const auto leader_root = root / "endpoint-leader";
+  mq::server::Broker follower(follower_root); assert(follower.Open());
+  assert(follower.Handle([&] { mq::protocol::Request request; request.command = mq::protocol::Command::kCreateTopic; request.topic = "failover"; request.payload = std::string("\0\0\0\1", 4); return request; }()).status == mq::protocol::Status::kOk);
+  follower.ConfigureReplication("follower", {}, 0, true);
+  mq::network::TcpServer follower_server("127.0.0.1", 0, 1, [&follower](const auto& request) { return follower.Handle(request); });
+  assert(follower_server.Start());
+  mq::server::Broker failover_leader(leader_root); assert(failover_leader.Open());
+  mq::protocol::Request failover_topic; failover_topic.command = mq::protocol::Command::kCreateTopic; failover_topic.topic = "failover"; failover_topic.payload = std::string("\0\0\0\1", 4);
+  assert(failover_leader.Handle(failover_topic).status == mq::protocol::Status::kOk);
+  mq::network::TcpServer leader_server("127.0.0.1", 0, 1, [&failover_leader](const auto& request) { return failover_leader.Handle(request); });
+  assert(leader_server.Start());
+  mq::client::MqProducer failover_producer;
+  assert(failover_producer.connect({{"127.0.0.1", follower_server.port()}, {"127.0.0.1", leader_server.port()}}));
+  assert(failover_producer.produce("failover", "k", "v"));
+  failover_producer.close(); leader_server.Stop(); follower_server.Stop();
   producer.close(); consumer.close(); server.Stop(); broker.Flush(); std::filesystem::remove_all(root, ec); return 0;
 }

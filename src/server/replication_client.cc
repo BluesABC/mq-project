@@ -50,7 +50,7 @@ ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::
     : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms == 0 ? 1000 : timeout_ms) {}
 
 bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std::string payload,
-                             std::string* response_payload) {
+                             std::string* response_payload, bool term_payload) {
 #ifdef _WIN32
   static bool initialized = false;
   if (!initialized) { WSADATA data{}; if (WSAStartup(MAKEWORD(2, 2), &data) != 0) { error_ = "WSAStartup failed"; return false; } initialized = true; }
@@ -63,7 +63,7 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
   const bool connected = ::connect(socket, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0;
   freeaddrinfo(result);
   if (!connected) { CloseSocket(socket); error_ = "connect failed"; return false; }
-  protocol::Request request; request.command = static_cast<protocol::Command>(command); request.request_id = request_id_++; request.flags = protocol::kFlagReplication; request.topic = topic; request.payload = std::move(payload);
+  protocol::Request request; request.command = static_cast<protocol::Command>(command); request.request_id = request_id_++; request.flags = protocol::kFlagReplication | (term_payload ? protocol::kFlagReplicationTerm : 0); request.topic = topic; request.payload = std::move(payload);
   std::string frame;
   protocol::Response response;
   bool okay = protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAll(socket, frame);
@@ -100,16 +100,27 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
   return position == response.size();
 }
 
-bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition, const std::vector<core::Message>& messages) {
+bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition, const std::vector<core::Message>& messages, std::uint64_t term, std::uint64_t commit_index, const std::string& leader_id) {
   if (messages.empty()) return false;
-  std::string payload; Put32(&payload, partition); Put32(&payload, static_cast<std::uint32_t>(messages.size()));
+  std::string payload; if (term != 0) { Put64(&payload, term); Put64(&payload, commit_index); Put16(&payload, static_cast<std::uint16_t>(leader_id.size())); payload.append(leader_id); } Put32(&payload, partition); Put32(&payload, static_cast<std::uint32_t>(messages.size()));
   for (const auto& message : messages) { Put64(&payload, message.offset); Put64(&payload, static_cast<std::uint64_t>(message.timestamp_ms)); Put16(&payload, static_cast<std::uint16_t>(message.key.size())); payload.append(message.key); Put32(&payload, static_cast<std::uint32_t>(message.value.size())); payload.append(message.value); }
-  return Call(static_cast<std::uint8_t>(protocol::Command::kReplicaAppend), topic, std::move(payload), nullptr);
+  return Call(static_cast<std::uint8_t>(protocol::Command::kReplicaAppend), topic, std::move(payload), nullptr, term != 0);
 }
 
-bool ReplicationClient::Heartbeat(const std::string& node_id, std::uint64_t replicated_offset) {
+bool ReplicationClient::Heartbeat(const std::string& node_id, std::uint64_t replicated_offset, std::uint64_t term, std::uint64_t commit_index) {
   std::string payload; Put16(&payload, static_cast<std::uint16_t>(node_id.size())); payload.append(node_id); Put64(&payload, replicated_offset);
-  return Call(static_cast<std::uint8_t>(protocol::Command::kHeartbeat), node_id, std::move(payload), nullptr);
+  if (term != 0) { Put64(&payload, term); Put64(&payload, commit_index); }
+  return Call(static_cast<std::uint8_t>(protocol::Command::kHeartbeat), node_id, std::move(payload), nullptr, term != 0);
+}
+
+bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id, bool* granted) {
+  if (granted == nullptr || candidate_id.empty() || candidate_id.size() > UINT16_MAX) return false;
+  std::string payload; Put64(&payload, term); Put16(&payload, static_cast<std::uint16_t>(candidate_id.size())); payload.append(candidate_id);
+  std::string response;
+  if (!Call(static_cast<std::uint8_t>(protocol::Command::kReplicaVote), candidate_id, std::move(payload), &response)) return false;
+  if (response.size() != 1) { error_ = "invalid vote response"; return false; }
+  *granted = response[0] != 0;
+  return true;
 }
 
 }  // namespace mq::server

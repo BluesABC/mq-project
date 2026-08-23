@@ -141,3 +141,9 @@ tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
 - [ ] 防火墙放行监听端口；无 TLS（明文）场景确认网络可信
 - [ ] 监控与告警接入（§5.3）
 - [ ] 压测达标（`docs/performance-baseline.md`）
+
+### 7.1 P2 高可用检查
+
+- [ ] 副本节点使用唯一 `node_id`，并配置至少 3 个节点以保证分区下仍可形成多数派。
+- [ ] `ack=all` 仅在多数派可达时使用；少于多数派时客户端应处理 `STORAGE_ERROR`/`NOT_LEADER` 并切换 endpoint。
+- [ ] 故障演练需验证旧 Leader 分区后拒绝写入、候选节点获得多数票后接管，以及旧节点恢复后以 Follower 身份重新同步。

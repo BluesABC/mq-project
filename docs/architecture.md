@@ -175,3 +175,7 @@ offset 为全局递增逻辑偏移（相对 partition 首条消息，从 0 开�
 | P1 MVP | 单机持久化 Broker + 客户端，epoll Reactor，生产/消费全链路 |
 | P2 高可用 | 主从复制、ack 语义、故障切换 |
 | P3 生产化 | 监控、限流、配额、管理工具完善 |
+
+### 9.1 P2 复制安全
+
+复制协调器维护单调递增任期、投票者、Leader 角色和 commit index。写入仅由当前 Leader 接受；配置副本后，Leader 失去多数派心跳时拒绝对外生产。副本追加携带任期和 Leader 标识，低任期请求被拒绝；ack=all 只有本地日志和多数副本确认后推进提交索引。SDK 可配置多个 Broker endpoint，在连接失败时轮换并按指数退避重连。

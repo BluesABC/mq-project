@@ -73,7 +73,7 @@ void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPe
   replication_peers_ = std::move(peers);
   replication_quorum_ = quorum == 0 ? replication_peers_.size() + 1 : quorum;
   follower_ = follower;
-  replication_coordinator_ = std::make_unique<ReplicationCoordinator>(node_id_);
+  replication_coordinator_ = std::make_unique<ReplicationCoordinator>(node_id_, follower ? ReplicaRole::kFollower : ReplicaRole::kLeader);
   for (const auto& peer : replication_peers_) replication_coordinator_->RegisterReplica(peer.node_id);
 }
 
@@ -91,17 +91,22 @@ void Broker::StopReplication() {
 
 void Broker::ReplicationLoop() {
   try {
+    auto last_election = std::chrono::steady_clock::now() - std::chrono::seconds(2);
     while (!stop_replication_.load(std::memory_order_acquire)) {
-      if (follower_) {
+      if (replication_coordinator_->role() != ReplicaRole::kLeader) {
+        bool leader_seen = false;
         for (const auto& peer : replication_peers_) {
-          if (!peer.leader) continue;
-          ReplicationClient client(peer.host, peer.port);
-          for (const auto& topic : queues_.ListTopics()) {
-            for (std::uint32_t partition = 0; partition < topic.partition_count; ++partition) {
+          if (replication_coordinator_->role() == ReplicaRole::kFollower && peer.leader) {
+            ReplicationClient client(peer.host, peer.port);
+            if (client.Heartbeat(node_id_, 0)) leader_seen = true;
+            for (const auto& topic : queues_.ListTopics()) {
+              for (std::uint32_t partition = 0; partition < topic.partition_count; ++partition) {
               const auto key = topic.name + ":" + std::to_string(partition);
-              auto& offset = replication_offsets_[key];
+              std::uint64_t offset = 0;
+              { std::lock_guard lock(replication_mutex_); offset = replication_offsets_[key]; }
               std::vector<core::Message> messages;
               if (!client.Fetch(topic.name, partition, offset, 1024 * 1024, &messages)) continue;
+              leader_seen = true;
               bool applied = true;
               for (const auto& message : messages) {
                 std::string error;
@@ -109,17 +114,33 @@ void Broker::ReplicationLoop() {
               }
               if (applied && !messages.empty()) {
                 offset = messages.back().offset + 1;
+                { std::lock_guard lock(replication_mutex_); replication_offsets_[key] = offset; }
                 client.Heartbeat(node_id_, offset);
+              }
               }
             }
           }
         }
+        if (!leader_seen && std::chrono::steady_clock::now() - last_election >= std::chrono::seconds(1)) {
+          const auto election = replication_coordinator_->BeginElection();
+          std::size_t votes = 1;
+          for (const auto& peer : replication_peers_) {
+            if (peer.leader) continue;
+            ReplicationClient client(peer.host, peer.port);
+            bool granted = false;
+            if (client.Vote(election.term, node_id_, &granted) && granted) {
+              ++votes;
+              replication_coordinator_->ObserveVote(election.term, peer.node_id, true);
+            }
+          }
+          if (votes >= (replication_peers_.size() + 2) / 2 + 1) replication_coordinator_->ObserveVote(election.term, node_id_, true);
+          last_election = std::chrono::steady_clock::now();
+        }
       } else {
         for (const auto& peer : replication_peers_) {
           ReplicationClient client(peer.host, peer.port);
-          client.Heartbeat(node_id_, 0);
+          if (client.Heartbeat(node_id_, 0, replication_coordinator_->term(), replication_coordinator_->commitIndex())) replication_coordinator_->ObserveHeartbeat(peer.node_id, 0);
         }
-        replication_coordinator_->ElectLeader();
       }
       std::unique_lock lock(replication_mutex_);
       replication_cv_.wait_for(lock, std::chrono::milliseconds(250), [this] {
@@ -171,6 +192,8 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
       return HandleReplicaFetch(request);
     case protocol::Command::kReplicaAppend:
       return HandleReplicaAppend(request);
+    case protocol::Command::kReplicaVote:
+      return HandleReplicaVote(request);
     default:
       return MakeResponse(request, protocol::Status::kBadRequest);
   }
@@ -184,11 +207,18 @@ protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) != 0) {
     if (request.topic.empty() || request.payload.size() < 10) return MakeResponse(request, protocol::Status::kBadRequest);
     const auto node_size = Get16(request.payload, 0);
-    if (node_size == 0 || 2ULL + node_size + 8 != request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    if (node_size == 0 || (2ULL + node_size + 8 != request.payload.size() && 2ULL + node_size + 24 != request.payload.size())) return MakeResponse(request, protocol::Status::kBadRequest);
     const std::string node_id = request.payload.substr(2, node_size);
     const auto replicated_offset = Get64(request.payload, 2 + node_size);
     std::string response_payload;
     Put64(&response_payload, replicated_offset);
+    if (request.payload.size() == 2ULL + node_size + 24) {
+      const auto term = Get64(request.payload, 10 + node_size);
+      const auto commit = Get64(request.payload, 18 + node_size);
+      if (!replication_coordinator_->ObserveAppend(term, node_id, replicated_offset, commit)) return MakeResponse(request, protocol::Status::kStorageError);
+    } else {
+      replication_coordinator_->ObserveHeartbeat(node_id, replicated_offset);
+    }
     return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
   }
   if (!request.payload.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
@@ -225,6 +255,15 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
   if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() < 8)
     return MakeResponse(request, protocol::Status::kBadRequest);
   std::size_t position = 0;
+  if ((request.flags & protocol::kFlagReplicationTerm) != 0) {
+    if (request.payload.size() < 26) return MakeResponse(request, protocol::Status::kBadRequest);
+    const auto term = Get64(request.payload, 0);
+    const auto commit = Get64(request.payload, 8);
+    const auto leader_size = Get16(request.payload, 16);
+    if (leader_size == 0 || request.payload.size() < 18ULL + leader_size + 8) return MakeResponse(request, protocol::Status::kBadRequest);
+    if (!replication_coordinator_->ObserveAppend(term, request.payload.substr(18, leader_size), 0, commit)) return MakeResponse(request, protocol::Status::kStorageError);
+    position = 18 + leader_size;
+  }
   const auto partition = Get32(request.payload, position); position += 4;
   const auto count = Get32(request.payload, position); position += 4;
   if (count == 0 || count > 10000) return MakeResponse(request, protocol::Status::kBadRequest);
@@ -245,6 +284,18 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
   }
   if (position != request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
   return MakeResponse(request, protocol::Status::kOk);
+}
+
+protocol::Response Broker::HandleReplicaVote(const protocol::Request& request) {
+  if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() < 10)
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto term = Get64(request.payload, 0);
+  const auto size = Get16(request.payload, 8);
+  if (size == 0 || request.payload.size() != 10ULL + size)
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  const bool granted = replication_coordinator_->RequestVote(term, request.payload.substr(10, size));
+  std::string payload(1, granted ? '\1' : '\0');
+  return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
 protocol::Response Broker::HandleCommitOffset(const protocol::Request& request) {
@@ -314,6 +365,10 @@ protocol::Response Broker::HandleListTopic(const protocol::Request& request) {
 }
 
 protocol::Response Broker::HandleProduce(const protocol::Request& request) {
+  if ((request.flags & protocol::kFlagReplication) == 0 &&
+      replication_coordinator_->role() != ReplicaRole::kLeader) {
+    return MakeResponse(request, protocol::Status::kNotLeader);
+  }
   std::string_view payload = request.payload;
   std::size_t position = 0;
   std::uint64_t producer_id = 0, sequence = 0;
@@ -367,12 +422,13 @@ bool Broker::Replicate(const std::string& topic, std::uint32_t partition, const 
   std::size_t acknowledgements = 1;
   for (const auto& peer : replication_peers_) {
     ReplicationClient client(peer.host, peer.port);
-    if (client.Append(topic, partition, std::vector<core::Message>{message})) {
+    if (client.Append(topic, partition, std::vector<core::Message>{message}, replication_coordinator_->term(), replication_coordinator_->commitIndex(), node_id_)) {
       ++acknowledgements;
       replication_coordinator_->ObserveHeartbeat(peer.node_id, message.offset);
     }
   }
-  return acknowledgements >= replication_quorum_;
+  if (acknowledgements < replication_quorum_) return false;
+  return replication_coordinator_->AdvanceCommit(message.offset);
 }
 
 protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) {

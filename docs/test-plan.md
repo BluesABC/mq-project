@@ -1,6 +1,6 @@
 # mq-project 测试方案
 
-> 版本: v0.1 · 更新: 2026-08-19
+> 版本: v0.1 · 更新: 2026-08-24
 
 ## 1. 测试层次
 
@@ -34,7 +34,8 @@ ctest --test-dir build --output-on-failure
 
 ### 5.1 性能与 sanitizer
 - [ ] Linux 标准矩阵：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区
-- [ ] Linux ASan/UBSan 构建并运行全量 CTest
+- [x] Linux ASan/UBSan 构建并运行全量 CTest
+- [x] WSL2 Linux Debug 构建并运行全量 CTest
 
 ### 3.2 编解码 `codec_test`
 - [ ] 请求/响应帧编解码往返
@@ -67,6 +68,12 @@ ctest --test-dir build --output-on-failure
 
 ### 4.1 TCP 回环集成 `tcp_integration_test`
 - [x] 1000 个并发连接通过 Reactor 服务正确收发协议帧（Linux epoll / Windows select）
+
+### 4.2 P2 复制与故障切换
+- [x] ReplicationClient Fetch/Append/Heartbeat/Vote TCP 通信
+- [x] 任期递增、低任期请求拒绝和多数派选举
+- [x] 多数派 commit index 与 ack=all
+- [x] 多 endpoint 客户端收到 NOT_LEADER 后切换
 
 ## 4. 集成测试用例（P1 起）
 

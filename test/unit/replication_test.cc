@@ -23,5 +23,17 @@ int main() {
   assert(coordinator.role() == mq::server::ReplicaRole::kLeader);
   coordinator.RemoveReplica("node-c");
   assert(coordinator.Snapshot(start).size() == 1);
+
+  mq::server::ReplicationCoordinator election("node-a", mq::server::ReplicaRole::kFollower, 5s);
+  election.RegisterReplica("node-b");
+  election.RegisterReplica("node-c");
+  const auto round = election.BeginElection();
+  assert(round.term == 1);
+  assert(!election.ObserveVote(round.term - 1, "node-b", true));
+  assert(election.ObserveVote(round.term, "node-b", true));
+  assert(election.role() == mq::server::ReplicaRole::kLeader);
+  assert(election.term() == 1);
+  assert(election.CanServeWrites() == false);
+  assert(!election.ObserveAppend(0, "node-b", 1, 1));
   return 0;
 }

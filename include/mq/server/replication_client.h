@@ -15,13 +15,16 @@ class ReplicationClient {
   bool Fetch(const std::string& topic, std::uint32_t partition, std::uint64_t offset,
             std::uint32_t max_bytes, std::vector<core::Message>* messages);
   bool Append(const std::string& topic, std::uint32_t partition,
-              const std::vector<core::Message>& messages);
-  bool Heartbeat(const std::string& node_id, std::uint64_t replicated_offset);
+              const std::vector<core::Message>& messages, std::uint64_t term = 0,
+              std::uint64_t commit_index = 0, const std::string& leader_id = {});
+  bool Heartbeat(const std::string& node_id, std::uint64_t replicated_offset, std::uint64_t term = 0,
+                 std::uint64_t commit_index = 0);
+  bool Vote(std::uint64_t term, const std::string& candidate_id, bool* granted);
   const std::string& lastError() const { return error_; }
 
  private:
   bool Call(std::uint8_t command, const std::string& topic, std::string payload,
-            std::string* response_payload);
+            std::string* response_payload, bool term_payload = false);
 
   std::string host_;
   std::uint16_t port_;

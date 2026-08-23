@@ -20,6 +20,7 @@ enum class Command : std::uint8_t {
   kHeartbeat = 0x30,
   kReplicaFetch = 0x40,
   kReplicaAppend = 0x41,
+  kReplicaVote = 0x42,
 };
 
 enum class Status : std::uint8_t {
@@ -31,6 +32,7 @@ enum class Status : std::uint8_t {
   kStorageError = 0x14,
   kVersionMismatch = 0x15,
   kNotSupported = 0x16,
+  kNotLeader = 0x17,
   kInternalError = 0x20,
 };
 
@@ -40,6 +42,7 @@ constexpr std::uint16_t kAckOne = 0x0001;
 constexpr std::uint16_t kAckAll = 0x0002;
 constexpr std::uint16_t kFlagProducerMetadata = 0x0004;
 constexpr std::uint16_t kFlagReplication = 0x0008;
+constexpr std::uint16_t kFlagReplicationTerm = 0x0010;
 
 struct Request {
   std::uint8_t version = kCurrentVersion;

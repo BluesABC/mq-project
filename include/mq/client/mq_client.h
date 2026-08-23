@@ -21,6 +21,7 @@ class MqProducer {
   ~MqProducer();
   MqProducer(const MqProducer&) = delete;
   bool connect(const std::string& host, std::uint16_t port);
+  bool connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints);
   bool createTopic(const std::string& name, std::uint32_t partitions = 1);
   bool produce(const std::string& topic, const std::string& key, const std::string& value);
   bool produce(const std::string& topic, const std::string& key, const std::string& value,
@@ -45,6 +46,7 @@ class MqConsumer {
   ~MqConsumer();
   MqConsumer(const MqConsumer&) = delete;
   bool connect(const std::string& host, std::uint16_t port);
+  bool connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints);
   bool subscribe(const std::string& topic, const std::string& group);
   bool subscribe(const std::string& topic, const std::string& group, std::uint32_t partition);
   std::optional<core::Message> poll(std::uint32_t timeout_ms = 5000);

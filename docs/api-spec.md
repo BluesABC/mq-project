@@ -60,7 +60,7 @@
 | `PRODUCE` | `partition(4) | key_len(2) | key | value_len(4) | value`；`partition=0xFFFFFFFF` 表示按 key 路由 | `partition(4) | offset(8)` |
 | `FETCH` | `partition(4) | offset(8) | max_bytes(4)` | `count(4)`，重复 `offset(8) | timestamp_ms(8) | key_len(2) | key | value_len(4) | value` |
 
-P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求会被拒绝）：`REPLICA_FETCH(0x40)` 使用与 `FETCH` 相同的请求和响应布局；`REPLICA_APPEND(0x41)` 请求载荷为 `partition(4) | count(4)`，后接重复的消息记录，Follower 只接受连续的 offset。
+P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求会被拒绝）：`REPLICA_FETCH(0x40)` 使用与 `FETCH` 相同的请求和响应布局；`REPLICA_APPEND(0x41)` 请求载荷为 `partition(4) | count(4)`，后接重复的消息记录，Follower 只接受连续的 offset；`REPLICA_VOTE(0x42)` 载荷为 `term(8) | candidate_id_len(2) | candidate_id`，用于多数派选举。副本节点必须拒绝低于本地任期的复制请求。
 
 `COMMIT_OFFSET` 请求载荷为 `group_len(2) | group | partition(4) | offset(8)`，Topic 取请求帧中的 `topic` 字段；`HEARTBEAT` 请求载荷为空，成功返回空载荷。
 
@@ -68,7 +68,7 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 
 - `PRODUCE` 的 `key_len` 最大为 65535，`value_len` 范围为 1~1048576。
 - `FETCH` 的 `max_bytes` 必须大于 0；若起始 offset 超出已提交范围，返回 `INVALID_OFFSET`。
-- P1 默认使用本地 `ack=1`；P2 配置副本 peer 后，`ack=all` 等待本地写入和配置 quorum 的同步副本确认，副本不可达时返回 `STORAGE_ERROR`。
+- P1 默认使用本地 `ack=1`；P2 配置副本 peer 后，`ack=all` 只有当前任期 Leader 在多数派可达且提交索引覆盖该消息时成功，副本不可达、节点处于分区或请求到达非 Leader 时分别返回 `STORAGE_ERROR` 或 `NOT_LEADER`。
 
 ## 4. 状态码（Status 枚举）
 
@@ -82,6 +82,7 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 | 0x14 | STORAGE_ERROR |
 | 0x15 | VERSION_MISMATCH |
 | 0x16 | NOT_SUPPORTED |
+| 0x17 | NOT_LEADER |
 | 0x20 | INTERNAL_ERROR |
 
 ## 4.1 版本协商
@@ -94,6 +95,7 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 
 - 客户端重复发送同一 `request_id` 时，Broker 返回上次结果（幂等表，近期滑动窗口）。
 - 超时/网络错误由客户端重试，保证 at-least-once。
+- SDK 可配置多个 Broker endpoint；收到 `NOT_LEADER` 或连接失败时按轮询顺序切换 endpoint，并在请求超时窗口内使用指数退避重试。
 
 ## 6. 变更流程
 

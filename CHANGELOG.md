@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### P2 高可用与 Linux 验证
+- 增加任期、投票、多数派提交索引和网络分区写入保护。
+- 增加复制心跳、低任期请求拒绝、Follower 失联选举和客户端多 endpoint 故障切换。
+- Windows Debug CTest 10/10、WSL2 Linux CTest 10/10、WSL2 ASan/UBSan CTest 10/10 通过。
+- WSL2 真实 TCP 冒烟完成 1000 条消息生产并验证 Broker 优雅退出。
+
 ### 项目状态
 - 完成 P1 进度盘点：基础协议、存储、并发、Broker、Topic 元数据持久化、Windows TCP 验证与日志已落地；消费者组、Linux epoll、SDK、性能基线和高可用尚未完成。
 

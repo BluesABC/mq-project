@@ -50,6 +50,7 @@ class Broker {
   protocol::Response HandleHeartbeat(const protocol::Request& request);
   protocol::Response HandleReplicaFetch(const protocol::Request& request);
   protocol::Response HandleReplicaAppend(const protocol::Request& request);
+  protocol::Response HandleReplicaVote(const protocol::Request& request);
   protocol::Response MakeResponse(const protocol::Request& request, protocol::Status status,
                                   std::string payload = {}) const;
   bool Replicate(const std::string& topic, std::uint32_t partition, const core::Message& message);
