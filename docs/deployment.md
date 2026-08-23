@@ -69,7 +69,7 @@ systemctl stop mq-broker     # SIGTERM：flush + 安全退出
 
 Broker 当前支持 INI 配置文件，示例见 `conf/broker.conf`。启动入口会加载监听地址/端口、数据目录、Sub Reactor 数量、段大小和保留时长；收到 SIGTERM/SIGINT 后停止接收连接、停止 Reactor、刷新 WAL 后退出。
 
-消费者位点保存在 `data/metadata/consumer_offsets.meta`，采用临时文件加原子替换，与 Topic 元数据快照一致。
+消费者位点保存在 `data/metadata/consumer_offsets.meta`，采用临时文件加原子替换，与 Topic 元数据快照一致。P2 的副本协调状态目前为进程内状态，重启后需由节点心跳重新建立，尚未作为持久化元数据发布。
 
 - 优雅停机：接收 SIGTERM → 停止 accept → 停止 Worker → flush 写缓冲 + fsync → 关闭段文件 → 退出。
 - 强制终止（kill -9）安全：恢复时截断未写完记录（见 `docs/design-details.md` §1.7）。

@@ -66,7 +66,7 @@
 
 - `PRODUCE` 的 `key_len` 最大为 65535，`value_len` 范围为 1~1048576。
 - `FETCH` 的 `max_bytes` 必须大于 0；若起始 offset 超出已提交范围，返回 `INVALID_OFFSET`。
-- 当前 P1 实现只支持 `ack=1` 的本地写入确认；`ack=0` 和 `ack=all` 保留给复制模块。
+- P1 实现只支持 `ack=1` 的本地写入确认；P2 复制协调器定义副本确认所需的 quorum，但真实跨节点传输接入前 `ack=all` 仍返回 `NOT_SUPPORTED`。
 
 ## 4. 状态码（Status 枚举）
 

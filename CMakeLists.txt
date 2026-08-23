@@ -40,7 +40,7 @@ add_library(mq_core
 )
 target_include_directories(mq_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_library(mq_server src/server/broker.cc)
+add_library(mq_server src/server/broker.cc src/server/replication.cc)
 target_include_directories(mq_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(mq_core PUBLIC Threads::Threads)
 target_link_libraries(mq_server PUBLIC mq_core mq_protocol)
@@ -117,4 +117,9 @@ if(MQ_BUILD_TESTS)
   target_link_libraries(mq_client_tests PRIVATE mq_client mq_network mq_server)
   target_include_directories(mq_client_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME mq_client_tests COMMAND mq_client_tests)
+
+  add_executable(mq_replication_tests test/unit/replication_test.cc)
+  target_link_libraries(mq_replication_tests PRIVATE mq_server)
+  target_include_directories(mq_replication_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME mq_replication_tests COMMAND mq_replication_tests)
 endif()
