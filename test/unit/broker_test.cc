@@ -109,6 +109,32 @@ mq::protocol::Request FetchRequest(std::uint64_t request_id, std::uint32_t parti
   return request;
 }
 
+mq::protocol::Request ReplicaFetchRequest(std::uint64_t request_id, std::uint32_t partition,
+                                          std::uint64_t offset) {
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kReplicaFetch;
+  request.request_id = request_id;
+  request.flags = mq::protocol::kFlagReplication;
+  request.topic = "orders";
+  Put32(&request.payload, partition);
+  Put64(&request.payload, offset);
+  Put32(&request.payload, 1024);
+  return request;
+}
+
+mq::protocol::Request ReplicaAppendRequest(std::uint64_t request_id, std::uint32_t partition,
+                                           const std::string& messages) {
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kReplicaAppend;
+  request.request_id = request_id;
+  request.flags = mq::protocol::kFlagReplication;
+  request.topic = "orders";
+  Put32(&request.payload, partition);
+  Put32(&request.payload, Get32(messages, 0));
+  request.payload.append(messages, 4, messages.size() - 4);
+  return request;
+}
+
 mq::protocol::Request CommitRequest(std::uint64_t request_id, std::string group,
                                     std::uint32_t partition, std::uint64_t offset) {
   mq::protocol::Request request;
@@ -187,10 +213,35 @@ void RestoresTopicMetadata() {
   std::filesystem::remove_all(root, error);
 }
 
+void ReplicatesContiguousMessages() {
+  const auto leader_root = std::filesystem::temp_directory_path() / "mq_project_leader_test";
+  const auto follower_root = std::filesystem::temp_directory_path() / "mq_project_follower_test";
+  std::error_code error;
+  std::filesystem::remove_all(leader_root, error);
+  std::filesystem::remove_all(follower_root, error);
+  mq::server::Broker leader(leader_root);
+  mq::server::Broker follower(follower_root);
+  assert(leader.Open() && follower.Open());
+  assert(leader.Handle(CreateTopicRequest(1)).status == mq::protocol::Status::kOk);
+  assert(follower.Handle(CreateTopicRequest(1)).status == mq::protocol::Status::kOk);
+  const auto produced = leader.Handle(ProduceRequest(2, "replica-key", "replica-value"));
+  assert(produced.status == mq::protocol::Status::kOk);
+  const auto partition = Get32(produced.payload, 0);
+  const auto fetched = leader.Handle(ReplicaFetchRequest(3, partition, 0));
+  assert(fetched.status == mq::protocol::Status::kOk && Get32(fetched.payload, 0) == 1);
+  assert(follower.Handle(ReplicaAppendRequest(4, partition, fetched.payload)).status == mq::protocol::Status::kOk);
+  const auto follower_fetch = follower.Handle(FetchRequest(5, partition));
+  assert(follower_fetch.status == mq::protocol::Status::kOk && Get32(follower_fetch.payload, 0) == 1);
+  assert(follower.Handle(ReplicaAppendRequest(6, partition, fetched.payload)).status == mq::protocol::Status::kInvalidOffset);
+  std::filesystem::remove_all(leader_root, error);
+  std::filesystem::remove_all(follower_root, error);
+}
+
 }  // namespace
 
 int main() {
   CreateProduceFetch();
   RestoresTopicMetadata();
+  ReplicatesContiguousMessages();
   return 0;
 }

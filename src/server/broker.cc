@@ -99,6 +99,10 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
       return HandleCommitOffset(request);
     case protocol::Command::kHeartbeat:
       return HandleHeartbeat(request);
+    case protocol::Command::kReplicaFetch:
+      return HandleReplicaFetch(request);
+    case protocol::Command::kReplicaAppend:
+      return HandleReplicaAppend(request);
     default:
       return MakeResponse(request, protocol::Status::kBadRequest);
   }
@@ -112,6 +116,56 @@ protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
   if (!request.payload.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
   std::string error;
   if (!storage_.Flush(&error)) return MakeResponse(request, protocol::Status::kStorageError);
+  return MakeResponse(request, protocol::Status::kOk);
+}
+
+protocol::Response Broker::HandleReplicaFetch(const protocol::Request& request) {
+  if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() != 16)
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto partition = Get32(request.payload, 0);
+  const auto offset = Get64(request.payload, 4);
+  const auto max_bytes = Get32(request.payload, 12);
+  if (max_bytes == 0) return MakeResponse(request, protocol::Status::kBadRequest);
+  std::vector<core::Message> messages;
+  std::string error;
+  if (!storage_.Read(request.topic, partition, offset, max_bytes, &messages, &error))
+    return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic : protocol::Status::kStorageError);
+  std::string payload;
+  Put32(&payload, static_cast<std::uint32_t>(messages.size()));
+  for (const auto& message : messages) {
+    Put64(&payload, message.offset);
+    Put64(&payload, static_cast<std::uint64_t>(message.timestamp_ms));
+    Put16(&payload, static_cast<std::uint16_t>(message.key.size()));
+    payload.append(message.key);
+    Put32(&payload, static_cast<std::uint32_t>(message.value.size()));
+    payload.append(message.value);
+  }
+  return MakeResponse(request, protocol::Status::kOk, std::move(payload));
+}
+
+protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request) {
+  if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() < 8)
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  std::size_t position = 0;
+  const auto partition = Get32(request.payload, position); position += 4;
+  const auto count = Get32(request.payload, position); position += 4;
+  if (count == 0 || count > 10000) return MakeResponse(request, protocol::Status::kBadRequest);
+  std::string error;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (position + 18 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    core::Message message;
+    message.offset = Get64(request.payload, position); position += 8;
+    message.timestamp_ms = static_cast<std::int64_t>(Get64(request.payload, position)); position += 8;
+    const auto key_size = Get16(request.payload, position); position += 2;
+    if (position + key_size + 4 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    message.key.assign(request.payload, position, key_size); position += key_size;
+    const auto value_size = Get32(request.payload, position); position += 4;
+    if (position + value_size > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    message.value.assign(request.payload, position, value_size); position += value_size;
+    if (!storage_.AppendReplica(request.topic, partition, message, &error))
+      return MakeResponse(request, error == "replica offset gap" ? protocol::Status::kInvalidOffset : protocol::Status::kStorageError);
+  }
+  if (position != request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
   return MakeResponse(request, protocol::Status::kOk);
 }
 

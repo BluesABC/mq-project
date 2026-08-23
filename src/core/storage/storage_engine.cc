@@ -230,6 +230,78 @@ bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, st
   *message = next; return true;
 }
 
+bool StorageEngine::AppendReplica(const std::string& topic, std::uint32_t partition,
+                                  const Message& message, std::string* error) {
+  if (!IsValidTopicName(topic) || message.key.size() > 65535 || message.value.empty() ||
+      message.value.size() > kMaxMessageBytes) {
+    if (error) *error = "invalid message";
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) {
+    std::error_code ec;
+    std::filesystem::create_directories(data_dir_ / "queues", ec);
+    if (ec) { if (error) *error = ec.message(); return false; }
+    opened_ = true;
+  }
+  auto* target = GetPartition(topic, partition, error);
+  if (target == nullptr) return false;
+  if (message.offset != target->next_offset) {
+    if (error) *error = "replica offset gap";
+    return false;
+  }
+  std::string body;
+  Put64(&body, message.offset);
+  Put64(&body, static_cast<std::uint64_t>(message.timestamp_ms));
+  Put16(&body, static_cast<std::uint16_t>(message.key.size()));
+  body.append(message.key);
+  Put32(&body, static_cast<std::uint32_t>(message.value.size()));
+  body.append(message.value);
+  std::string record;
+  Put32(&record, Crc32(body));
+  Put32(&record, static_cast<std::uint32_t>(body.size()));
+  record.append(body);
+  auto& active = target->segments.back();
+  if (active->size != 0 && active->size + record.size() > config_.segment_size_bytes) {
+    auto segment = std::make_unique<Partition::Segment>();
+    segment->number = active->number + 1;
+    segment->path = SegmentPath(target->directory, segment->number);
+    segment->index_path = segment->path;
+    segment->index_path.replace_extension(".index");
+    segment->file.open(segment->path, std::ios::in | std::ios::out | std::ios::binary | std::ios::app);
+    if (!segment->file) { if (error) *error = "cannot create WAL segment"; return false; }
+    target->segments.push_back(std::move(segment));
+  }
+  auto& current = target->segments.back();
+  const auto position = current->size;
+  current->file.clear();
+  current->file.seekp(0, std::ios::end);
+  current->file.write(record.data(), static_cast<std::streamsize>(record.size()));
+  if (!current->file) { if (error) *error = "WAL write failed"; return false; }
+  if (message.offset % config_.index_interval == 0) {
+    std::ofstream index(current->index_path, std::ios::binary | std::ios::app);
+    std::string item;
+    Put64(&item, message.offset);
+    Put64(&item, position);
+    index.write(item.data(), 16);
+  }
+  current->size += record.size();
+  current->last_timestamp_ms = message.timestamp_ms;
+  current->messages.push_back(message);
+  ++target->next_offset;
+  current->file.flush();
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - target->last_sync).count();
+  const bool sync = config_.fsync_policy == FsyncPolicy::kPerMessage ||
+                    (config_.fsync_policy == FsyncPolicy::kInterval && elapsed >= config_.fsync_interval_ms);
+  if (sync && (!SyncPath(current->path) || !SyncPath(current->index_path))) {
+    if (error) *error = "WAL fsync failed";
+    return false;
+  }
+  if (sync) target->last_sync = std::chrono::steady_clock::now();
+  return true;
+}
+
 bool StorageEngine::Read(const std::string& topic, std::uint32_t partition, std::uint64_t start_offset,
                          std::uint32_t max_bytes, std::vector<Message>* messages, std::string* error) const {
   if (!IsValidTopicName(topic) || messages == nullptr || max_bytes == 0) return false;

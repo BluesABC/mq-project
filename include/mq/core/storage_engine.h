@@ -41,6 +41,8 @@ class StorageEngine {
   bool Open(std::string* error = nullptr);
   bool Append(const std::string& topic, std::uint32_t partition, std::string key,
               std::string value, Message* message, std::string* error = nullptr);
+  bool AppendReplica(const std::string& topic, std::uint32_t partition,
+                     const Message& message, std::string* error = nullptr);
   bool Read(const std::string& topic, std::uint32_t partition, std::uint64_t start_offset,
             std::uint32_t max_bytes, std::vector<Message>* messages,
             std::string* error = nullptr) const;

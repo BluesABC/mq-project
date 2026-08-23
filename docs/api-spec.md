@@ -60,6 +60,8 @@
 | `PRODUCE` | `partition(4) | key_len(2) | key | value_len(4) | value`；`partition=0xFFFFFFFF` 表示按 key 路由 | `partition(4) | offset(8)` |
 | `FETCH` | `partition(4) | offset(8) | max_bytes(4)` | `count(4)`，重复 `offset(8) | timestamp_ms(8) | key_len(2) | key | value_len(4) | value` |
 
+P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求会被拒绝）：`REPLICA_FETCH(0x40)` 使用与 `FETCH` 相同的请求和响应布局；`REPLICA_APPEND(0x41)` 请求载荷为 `partition(4) | count(4)`，后接重复的消息记录，Follower 只接受连续的 offset。
+
 `COMMIT_OFFSET` 请求载荷为 `group_len(2) | group | partition(4) | offset(8)`，Topic 取请求帧中的 `topic` 字段；`HEARTBEAT` 请求载荷为空，成功返回空载荷。
 
 `PRODUCE` 的 SDK 扩展请求在 flags 设置 `PRODUCER_METADATA` 时，载荷前置 `producer_id(8) | sequence(8)`；Broker 按二元组去重并缓存响应。`PRODUCE_BATCH`（0x11）载荷为 `producer_id(8) | first_sequence(8) | count(4)`，后接重复的 `key_len(2) | key | value_len(4) | value`。ack flags：0 为 ack=0，1 为 ack=1，2 为 ack=all；当前 ack=all 返回 `NOT_SUPPORTED`。

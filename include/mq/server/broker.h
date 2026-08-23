@@ -32,6 +32,8 @@ class Broker {
   protocol::Response HandleFetch(const protocol::Request& request);
   protocol::Response HandleCommitOffset(const protocol::Request& request);
   protocol::Response HandleHeartbeat(const protocol::Request& request);
+  protocol::Response HandleReplicaFetch(const protocol::Request& request);
+  protocol::Response HandleReplicaAppend(const protocol::Request& request);
   protocol::Response MakeResponse(const protocol::Request& request, protocol::Status status,
                                   std::string payload = {}) const;
 
