@@ -1,6 +1,8 @@
 #include <cassert>
 #include <filesystem>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "mq/server/broker.h"
 
@@ -156,6 +158,27 @@ mq::protocol::Request IdempotentProduceRequest(std::uint64_t request_id) {
   return request;
 }
 
+mq::protocol::Request ProduceBatchRequest(std::uint64_t request_id,
+                                          std::uint64_t producer_id,
+                                          std::uint64_t first_sequence,
+                                          const std::vector<std::pair<std::string, std::string>>& messages) {
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kProduceBatch;
+  request.request_id = request_id;
+  request.topic = "orders";
+  request.flags = mq::protocol::kFlagProducerMetadata | mq::protocol::kAckOne;
+  Put64(&request.payload, producer_id);
+  Put64(&request.payload, first_sequence);
+  Put32(&request.payload, static_cast<std::uint32_t>(messages.size()));
+  for (const auto& message : messages) {
+    Put16(&request.payload, static_cast<std::uint16_t>(message.first.size()));
+    request.payload.append(message.first);
+    Put32(&request.payload, static_cast<std::uint32_t>(message.second.size()));
+    request.payload.append(message.second);
+  }
+  return request;
+}
+
 void CreateProduceFetch() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_broker_test";
   std::error_code error;
@@ -196,6 +219,14 @@ void CreateProduceFetch() {
   broker.ConfigureRateLimit(1);
   assert(broker.Handle(ProduceRequest(8, "rate-1", "allowed")).status == mq::protocol::Status::kOk);
   assert(broker.Handle(ProduceRequest(9, "rate-2", "limited")).status == mq::protocol::Status::kRateLimited);
+  broker.ConfigureRateLimit(0);
+  broker.ConfigureTopicQuota(7);
+  const auto oversized_batch = ProduceBatchRequest(10, 200, 0, {{"a", "123"}, {"b", "123"}});
+  assert(broker.Handle(oversized_batch).status == mq::protocol::Status::kQuotaExceeded);
+  assert(broker.Handle(ProduceRequest(11, "q", "123")).status == mq::protocol::Status::kOk);
+  assert(broker.Handle(ProduceRequest(12, "q", "123")).status == mq::protocol::Status::kQuotaExceeded);
+  const auto quota_metrics = broker.Handle(metrics_request);
+  assert(quota_metrics.payload.find("mq_topic_produce_quota_bytes_per_second 7") != std::string::npos);
   std::filesystem::remove_all(root, error);
 }
 

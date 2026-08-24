@@ -35,6 +35,7 @@ enum class Status : std::uint8_t {
   kNotSupported = 0x16,
   kNotLeader = 0x17,
   kRateLimited = 0x18,
+  kQuotaExceeded = 0x19,
   kInternalError = 0x20,
 };
 

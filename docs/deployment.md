@@ -49,6 +49,7 @@ cmake --install build --prefix /opt/mq
 | `storage.retention_ms` | `7d` | 按消息时间清理段 |
 | `storage.retention_bytes` | `1GiB` | 按总段大小清理段 |
 | `storage.cleaner_interval_ms` | `1000` | 后台清理扫描周期 |
+| `topic_produce_quota_bytes` | `0` | 每个 Topic 每秒允许的 key/value 字节数，0 表示不限额 |
 | `storage.retention_ms` | `7d` | 消息保留时长（TTL） |
 | `network.max_connections` | `50000` | 最大连接数 |
 | `network.buffer_limit` | `8MB` | 单连接读写缓冲上限 |
@@ -105,7 +106,7 @@ tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
 
 ### 5.3 监控
 - 指标暴露：通过协议 `METRICS(0x04)` 获取 Prometheus 文本；需要 HTTP `/metrics` 时由外部 exporter 转发，避免 Broker 引入第二套监听协议。
-- 当前输出包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index` 和 `mq_replication_role`。
+- 当前输出包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index`、`mq_replication_role`、`mq_topic_produce_quota_bytes_per_second` 和 `mq_topic_produce_bytes_used`。
 - 关注项与告警阈值（建议）：
   | 指标 | 阈值 | 级别 |
   |------|------|------|
@@ -116,7 +117,9 @@ tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
   | 数据目录剩余 | < 20% | critical |
 | 连接数 | > 80% × max_connections | warning |
 
-生产保护：配置 `produce_rate_limit` 为每秒允许的 PRODUCE/PRODUCE_BATCH 请求数，`0` 表示不限流。超过限制时 Broker 返回 `RATE_LIMITED`，客户端应按退避策略重试；复制内部请求不受该限制影响。
+生产保护：配置 `produce_rate_limit` 为每秒允许的 PRODUCE/PRODUCE_BATCH 请求数，`0` 表示不限流。超过限制时 Broker 返回 `RATE_LIMITED`，客户端应按退避策略重试；复制内部请求不受该限制影响。配置 `topic_produce_quota_bytes` 可进一步限制每个 Topic 每秒的消息 key/value 字节数，超限返回 `QUOTA_EXCEEDED`。批量请求在任何 WAL 写入前完成整批配额检查，避免超额批次部分落盘。
+
+`METRICS` 暴露配额配置和当前窗口的聚合使用量，可用于配额告警。
 
 ### 5.4 日志
 - 日志级别与输出见 `AGENTS.md` §3.5；建议生产配置 `info`。

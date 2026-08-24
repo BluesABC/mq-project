@@ -79,6 +79,8 @@ ctest --test-dir build --output-on-failure
 - [x] `METRICS` 返回 Prometheus 文本指标
 - [x] 生产请求按秒限流，超限返回 `RATE_LIMITED`
 - [x] 批量生产按请求计数，复制内部请求不受生产限流影响
+- [x] Topic 每秒生产字节配额，单条与批量超限拒绝且批量不部分写入
+- [x] 配额指标暴露当前配置与窗口使用量
 
 ## 4. 集成测试用例（P1 起）
 

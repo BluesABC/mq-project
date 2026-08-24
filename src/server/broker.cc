@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include <sstream>
+#include <limits>
 
 #include "mq/core/logger.h"
 #include "mq/server/replication.h"
@@ -84,6 +85,12 @@ void Broker::ConfigureRateLimit(std::uint64_t produce_requests_per_second) {
   produce_window_start_ = std::chrono::steady_clock::now();
 }
 
+void Broker::ConfigureTopicQuota(std::uint64_t produce_bytes_per_second) {
+  std::lock_guard lock(topic_quota_mutex_);
+  topic_produce_quota_ = produce_bytes_per_second;
+  topic_quota_windows_.clear();
+}
+
 bool Broker::AllowProduceRequest() {
   std::lock_guard lock(rate_limit_mutex_);
   if (produce_rate_limit_ == 0) return true;
@@ -94,6 +101,21 @@ bool Broker::AllowProduceRequest() {
   }
   if (produce_window_count_ >= produce_rate_limit_) return false;
   ++produce_window_count_;
+  return true;
+}
+
+bool Broker::AllowTopicBytes(const std::string& topic, std::uint64_t bytes) {
+  std::lock_guard lock(topic_quota_mutex_);
+  if (topic_produce_quota_ == 0) return true;
+  if (bytes > topic_produce_quota_) return false;
+  auto& window = topic_quota_windows_[topic];
+  const auto now = std::chrono::steady_clock::now();
+  if (now - window.start >= std::chrono::seconds(1)) {
+    window.start = now;
+    window.bytes = 0;
+  }
+  if (window.bytes > topic_produce_quota_ - bytes) return false;
+  window.bytes += bytes;
   return true;
 }
 
@@ -407,6 +429,13 @@ protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
       case ReplicaRole::kCandidate: role = "candidate"; break;
     }
   }
+  std::uint64_t topic_quota = 0;
+  std::uint64_t topic_quota_used = 0;
+  {
+    std::lock_guard lock(topic_quota_mutex_);
+    topic_quota = topic_produce_quota_;
+    for (const auto& entry : topic_quota_windows_) topic_quota_used += entry.second.bytes;
+  }
   std::ostringstream metrics;
   metrics << "# TYPE mq_requests_total counter\n"
           << "mq_requests_total " << request_count_.load(std::memory_order_relaxed) << "\n"
@@ -420,11 +449,16 @@ protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
           << "mq_replication_term " << (replication_coordinator_ ? replication_coordinator_->term() : 0) << "\n"
           << "# TYPE mq_commit_index gauge\n"
           << "mq_commit_index " << (replication_coordinator_ ? replication_coordinator_->commitIndex() : 0) << "\n"
+          << "# TYPE mq_topic_produce_quota_bytes_per_second gauge\n"
+          << "mq_topic_produce_quota_bytes_per_second " << topic_quota << "\n"
+          << "# TYPE mq_topic_produce_bytes_used gauge\n"
+          << "mq_topic_produce_bytes_used " << topic_quota_used << "\n"
           << "mq_replication_role{role=\"" << role << "\"} 1\n";
   return MakeResponse(request, protocol::Status::kOk, metrics.str());
 }
 
-protocol::Response Broker::HandleProduce(const protocol::Request& request, bool enforce_rate_limit) {
+protocol::Response Broker::HandleProduce(const protocol::Request& request, bool enforce_rate_limit,
+                                         bool enforce_topic_quota) {
   if ((request.flags & protocol::kFlagReplication) == 0 &&
       replication_coordinator_->role() != ReplicaRole::kLeader) {
     return MakeResponse(request, protocol::Status::kNotLeader);
@@ -463,6 +497,9 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
     return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
                                                            : protocol::Status::kBadRequest);
   }
+  if (enforce_topic_quota && (request.flags & protocol::kFlagReplication) == 0 &&
+      !AllowTopicBytes(request.topic, static_cast<std::uint64_t>(key_length) + value_length))
+    return MakeResponse(request, protocol::Status::kQuotaExceeded);
   core::Message message;
   if (!storage_.Append(request.topic, partition, key, std::string(payload.substr(value_position, value_length)),
                        &message, &error)) {
@@ -504,26 +541,39 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
   if (!Take(payload, &position, 20)) return MakeResponse(request, protocol::Status::kBadRequest);
   const auto producer_id = Get64(payload, 0); const auto first_sequence = Get64(payload, 8); const auto count = Get32(payload, 16);
   if (count == 0 || count > 10000) return MakeResponse(request, protocol::Status::kBadRequest);
-  std::vector<protocol::Response> cached(count); std::vector<bool> is_cached(count, false);
+  std::vector<protocol::Response> results(count); std::vector<bool> is_cached(count, false);
   {
     std::lock_guard<std::mutex> lock(idempotency_mutex_);
-    for (std::uint32_t i = 0; i < count; ++i) { const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, first_sequence + i)); if (it != idempotency_cache_.end()) { cached[i] = it->second; is_cached[i] = true; } }
+    for (std::uint32_t i = 0; i < count; ++i) { const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, first_sequence + i)); if (it != idempotency_cache_.end()) { results[i] = it->second; is_cached[i] = true; } }
   }
-  std::string response_payload; Put32(&response_payload, count);
+  std::vector<protocol::Request> pending(count);
+  std::uint64_t new_bytes = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
     if (!Take(payload, &position, 2)) return MakeResponse(request, protocol::Status::kBadRequest);
     const auto key_size = Get16(payload, position - 2); const auto key_position = position;
     if (!Take(payload, &position, key_size) || !Take(payload, &position, 4)) return MakeResponse(request, protocol::Status::kBadRequest);
     const auto value_size = Get32(payload, position - 4); const auto value_position = position;
     if (!Take(payload, &position, value_size)) return MakeResponse(request, protocol::Status::kBadRequest);
-    if (is_cached[i]) { if (cached[i].payload.size() != 12) return MakeResponse(request, protocol::Status::kInternalError); response_payload.append(cached[i].payload); continue; }
+    if (is_cached[i]) { if (results[i].payload.size() != 12) return MakeResponse(request, protocol::Status::kInternalError); continue; }
     protocol::Request single = request; single.command = protocol::Command::kProduce; single.flags = (request.flags & ~protocol::kFlagProducerMetadata) | protocol::kFlagProducerMetadata;
     std::string single_payload; Put64(&single_payload, producer_id); Put64(&single_payload, first_sequence + i); Put32(&single_payload, 0xFFFFFFFFu); Put16(&single_payload, key_size); single_payload.append(payload.substr(key_position, key_size)); Put32(&single_payload, value_size); single_payload.append(payload.substr(value_position, value_size)); single.payload = std::move(single_payload);
-    const auto result = HandleProduce(single, false);
-    if (result.status != protocol::Status::kOk) return MakeResponse(request, result.status);
-    response_payload.append(result.payload);
+    pending[i] = std::move(single);
+    const auto message_bytes = static_cast<std::uint64_t>(key_size) + value_size;
+    if (new_bytes > std::numeric_limits<std::uint64_t>::max() - message_bytes)
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    new_bytes += message_bytes;
   }
   if (position != payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  if ((request.flags & protocol::kFlagReplication) == 0 && !AllowTopicBytes(request.topic, new_bytes))
+    return MakeResponse(request, protocol::Status::kQuotaExceeded);
+  std::string response_payload; Put32(&response_payload, count);
+  for (std::uint32_t i = 0; i < count; ++i) {
+    if (!is_cached[i]) {
+      results[i] = HandleProduce(pending[i], false, false);
+      if (results[i].status != protocol::Status::kOk) return MakeResponse(request, results[i].status);
+    }
+    response_payload.append(results[i].payload);
+  }
   return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
 }
 

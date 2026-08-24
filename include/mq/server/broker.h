@@ -36,6 +36,7 @@ class Broker {
   void ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers,
                             std::size_t quorum = 0, bool follower = false);
   void ConfigureRateLimit(std::uint64_t produce_requests_per_second);
+  void ConfigureTopicQuota(std::uint64_t produce_bytes_per_second);
   void StartReplication();
   void StopReplication();
   bool Flush(std::string* error = nullptr);
@@ -46,7 +47,8 @@ class Broker {
   protocol::Response HandleListTopic(const protocol::Request& request);
   protocol::Response HandleMetrics(const protocol::Request& request);
   protocol::Response HandleDeleteTopic(const protocol::Request& request);
-  protocol::Response HandleProduce(const protocol::Request& request, bool enforce_rate_limit = true);
+  protocol::Response HandleProduce(const protocol::Request& request, bool enforce_rate_limit = true,
+                                   bool enforce_topic_quota = true);
   protocol::Response HandleProduceBatch(const protocol::Request& request);
   protocol::Response HandleFetch(const protocol::Request& request);
   protocol::Response HandleCommitOffset(const protocol::Request& request);
@@ -58,6 +60,7 @@ class Broker {
                                   std::string payload = {}) const;
   bool Replicate(const std::string& topic, std::uint32_t partition, const core::Message& message);
   bool AllowProduceRequest();
+  bool AllowTopicBytes(const std::string& topic, std::uint64_t bytes);
 
   core::StorageEngine storage_;
   core::TopicMetadataStore metadata_store_;
@@ -87,6 +90,13 @@ class Broker {
   std::uint64_t produce_rate_limit_ = 0;
   std::uint64_t produce_window_count_ = 0;
   std::chrono::steady_clock::time_point produce_window_start_ = std::chrono::steady_clock::now();
+  struct TopicQuotaWindow {
+    std::uint64_t bytes = 0;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  };
+  std::mutex topic_quota_mutex_;
+  std::uint64_t topic_produce_quota_ = 0;
+  std::unordered_map<std::string, TopicQuotaWindow> topic_quota_windows_;
   void ReplicationLoop();
 };
 

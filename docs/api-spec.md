@@ -65,11 +65,12 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 
 `COMMIT_OFFSET` 请求载荷为 `group_len(2) | group | partition(4) | offset(8)`，Topic 取请求帧中的 `topic` 字段；`HEARTBEAT` 请求载荷为空，成功返回空载荷。
 
-`METRICS` 请求不携带 topic 和 payload，仅允许普通客户端请求，成功响应为 UTF-8 Prometheus 文本格式。指标包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index` 和 `mq_replication_role`。该命令只读，不修改 Broker 状态。
+`METRICS` 请求不携带 topic 和 payload，仅允许普通客户端请求，成功响应为 UTF-8 Prometheus 文本格式。指标包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index`、`mq_replication_role`、`mq_topic_produce_quota_bytes_per_second` 和 `mq_topic_produce_bytes_used`。该命令只读，不修改 Broker 状态。
 
 `PRODUCE` 的 SDK 扩展请求在 flags 设置 `PRODUCER_METADATA` 时，载荷前置 `producer_id(8) | sequence(8)`；Broker 按二元组去重并缓存响应。`PRODUCE_BATCH`（0x11）载荷为 `producer_id(8) | first_sequence(8) | count(4)`，后接重复的 `key_len(2) | key | value_len(4) | value`。ack flags：0 为 ack=0，1 为 ack=1，2 为 ack=all；当前 ack=all 返回 `NOT_SUPPORTED`。
 
 - `PRODUCE` 的 `key_len` 最大为 65535，`value_len` 范围为 1~1048576。
+- 配置 `topic_produce_quota_bytes` 后，每个 Topic 按秒限制新增消息的 `key` 和 `value` 字节总数；`0` 表示不限额。超过配额返回 `QUOTA_EXCEEDED`。批量请求按整批未命中幂等缓存的消息一次性计数，复制内部请求不受配额限制。
 - `FETCH` 的 `max_bytes` 必须大于 0；若起始 offset 超出已提交范围，返回 `INVALID_OFFSET`。
 - P1 默认使用本地 `ack=1`；P2 配置副本 peer 后，`ack=all` 只有当前任期 Leader 在多数派可达且提交索引覆盖该消息时成功，副本不可达、节点处于分区或请求到达非 Leader 时分别返回 `STORAGE_ERROR` 或 `NOT_LEADER`。
 
@@ -87,6 +88,7 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 | 0x16 | NOT_SUPPORTED |
 | 0x17 | NOT_LEADER |
 | 0x18 | RATE_LIMITED |
+| 0x19 | QUOTA_EXCEEDED |
 | 0x20 | INTERNAL_ERROR |
 
 ## 4.1 版本协商
