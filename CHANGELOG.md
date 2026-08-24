@@ -45,6 +45,7 @@
 - bench 消费读取 Topic 实际分区数，批量提交消费位点并在结束时补交最后位点；每次 bench 进程使用唯一 Producer ID，避免跨场景幂等缓存误命中。
 - SDK Consumer 缓存一次 Fetch 返回的整批消息，避免每次 `poll()` 丢弃同一响应的其余消息，消除百万消息消费的重复网络开销。
 - Windows Debug CTest 11/11、WSL2 Linux CTest 12/12、WSL2 ASan/UBSan CTest 12/12 通过；Windows/WSL2 1,000 条 TCP 生产消费验证通过。
+- VM16 Linux 完成 1,000,000 条消费基线：723,902 TPS，p99 0.401us，p999 998.266us，达到吞吐和 p99 目标。
 
 ### 测试构建修复
 - Release 构建的 CTest 目标强制取消 `NDEBUG`，避免测试断言被编译掉后继续使用无效数据。

@@ -1,6 +1,6 @@
 # mq-project 性能基线报告
 
-> 状态: P3 VM16 Linux 生产矩阵已记录，消费 1,000,000 条基线待在 VM16 补测 · 2026-08-24 更新
+> 状态: P3 VM16 Linux 生产与消费基线已记录 · 2026-08-24 更新
 > 基准环境与复现步骤见 §4；数据刷新后更新版本号与日期。
 
 ## 1. 基线摘要
@@ -8,9 +8,9 @@
 | 指标 | 目标（PRD §5.1） | 实测 | 结论 |
 |------|------------------|------|------|
 | 生产吞吐 (batch=1000, 3 分区) | ≥ 10w TPS | VM16：256 B/单连接 605,479 TPS；4 KiB/10 连接 137,965 TPS | 达到样本目标 |
-| 消费吞吐（多分区并行） | ≥ 10w TPS | VM16 1,000,000 条待补测；WSL2 1,000 条功能验证 4,803.93 TPS | 待正式基线 |
+| 消费吞吐（多分区并行） | ≥ 10w TPS | VM16：1,000,000 条、723,902 TPS | 达到目标 |
 | 生产 p50 / p99 | < 1ms / < 5ms | VM16：256 B/batch=1000 单连接 p50 约 1.46us，p99 约 2.66us | 达到样本目标 |
-| 消费 p99 | < 10ms | WSL2 1,000 条验证 p99 约 1,181us；VM16 1,000,000 条待补测 | 待正式基线 |
+| 消费 p99 | < 10ms | VM16：0.401us；p999 为 998.266us | 达到目标，存在少量长尾 |
 | 5w 连接内存占用/连接 | ≤ 1KB 空闲 | TBD | - |
 | 写入放大 | ≤ 2× | TBD | - |
 
@@ -24,6 +24,7 @@
 | 生产 batch=1000 | 256 B/10 连接/3 分区，VM16 | 830,343 TPS | 约 10.77us | 约 32.17us | 约 46.71us |
 | 生产 effective batch=251 | 4096 B/10 连接/3 分区，VM16 | 137,965 TPS | 约 66.56us | 约 211.49us | 约 443.78us |
 | 消费顺序读 | WSL2 热段，1,000 条/3 分区/3 连接 | 4,804 TPS | 约 349us | 约 1,181us | 约 30,338us |
+| 消费顺序读 | VM16 热段，1,000,000 条/3 分区/3 连接 | 723,902 TPS | 约 0.07us | 约 0.401us | 约 998.266us |
 | 消费随机 offset | 冷段/索引定位 | TBD | | | |
 | 长轮询消费 | 空队列挂起 | TBD | | | |
 
@@ -95,14 +96,14 @@ tools/check_bench_matrix.sh bench-results-<timestamp>.csv 3
 - 环境：VMware VM16 Linux Release，项目位于 VM 本地 Linux 磁盘 `/home/lzh/mq-project`；Broker `127.0.0.1:9092`。
 - 原始结果：`bench-results-20260824-203936.csv`。
 - 以上表格取每个场景 3 轮中位数；5 个生产场景均完成 1,000,000 条消息，矩阵回归门禁通过。
-- 消费基线需先生产一个保留 Topic，再执行：
+- 消费基线已完成；执行命令为：
 
 ```bash
 ./build-vm16/mq_bench produce --topic vm16_consume_baseline --messages 1000000 --size 256 --connections 3 --batch 1000 --partitions 3
 ./build-vm16/mq_bench consume --topic vm16_consume_baseline --group vm16_bench_group --messages 1000000 --connections 3 --partitions 3
 ```
 
-- 2026-08-24 已修复大 Fetch 响应超过 64KiB 网络写缓冲、bench 幂等 ID 跨场景复用和逐条提交位点问题；VM16 消费命令需使用本次修复后重新构建的 `mq_bench`/`mq_broker` 再记录结果。
+- 2026-08-24 已修复大 Fetch 响应超过 64KiB 网络写缓冲、bench 幂等 ID 跨场景复用、逐条提交位点和 SDK 丢弃批量 Fetch 响应的问题；VM16 使用修复后构建完成 1,000,000 条消费验证。
 
 ## 5. 回归判定
 
