@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <random>
 #include <thread>
 
@@ -149,15 +150,24 @@ void MqProducer::setProducerId(std::uint64_t producer_id) { impl_->producer_id =
 const std::string& MqProducer::lastError() const { return impl_->error; }
 
 struct MqConsumer::Impl : MqProducer::Impl {
-  std::string topic, group; std::uint32_t partition = 0; std::uint64_t next_offset = 0;
+  std::string topic, group;
+  std::uint32_t partition = 0;
+  std::uint64_t next_offset = 0;
+  std::deque<core::Message> pending_messages;
 };
 MqConsumer::MqConsumer() : impl_(std::make_unique<Impl>()) {}
 MqConsumer::~MqConsumer() = default;
-bool MqConsumer::connect(const std::string& host, std::uint16_t port) { impl_->host = host; impl_->port = port; impl_->Close(); return impl_->Connect(); }
-bool MqConsumer::connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints) { if (endpoints.empty()) return false; impl_->endpoints = endpoints; impl_->endpoint_index = 0; impl_->Close(); return impl_->Connect(); }
+bool MqConsumer::connect(const std::string& host, std::uint16_t port) { impl_->host = host; impl_->port = port; impl_->pending_messages.clear(); impl_->Close(); return impl_->Connect(); }
+bool MqConsumer::connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints) { if (endpoints.empty()) return false; impl_->endpoints = endpoints; impl_->endpoint_index = 0; impl_->pending_messages.clear(); impl_->Close(); return impl_->Connect(); }
 bool MqConsumer::subscribe(const std::string& topic, const std::string& group) { return subscribe(topic, group, 0); }
-bool MqConsumer::subscribe(const std::string& topic, const std::string& group, std::uint32_t partition) { impl_->topic = topic; impl_->group = group; impl_->partition = partition; impl_->next_offset = 0; return !topic.empty() && !group.empty(); }
+bool MqConsumer::subscribe(const std::string& topic, const std::string& group, std::uint32_t partition) { impl_->topic = topic; impl_->group = group; impl_->partition = partition; impl_->next_offset = 0; impl_->pending_messages.clear(); return !topic.empty() && !group.empty(); }
 std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
+  if (!impl_->pending_messages.empty()) {
+    auto message = std::move(impl_->pending_messages.front());
+    impl_->pending_messages.pop_front();
+    impl_->next_offset = message.offset + 1;
+    return message;
+  }
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kFetch;
   request.topic = impl_->topic;
@@ -175,35 +185,54 @@ std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
     return std::nullopt;
   }
   if (response.payload.size() < 4 || Get32(response.payload, 0) == 0) return std::nullopt;
+  const auto message_count = Get32(response.payload, 0);
+  if (message_count > 100000) {
+    impl_->error = "too many messages in fetch response";
+    return std::nullopt;
+  }
   std::size_t pos = 4;
-  if (pos + 18 > response.payload.size()) {
-    impl_->error = "invalid fetch response header";
+  for (std::uint32_t index = 0; index < message_count; ++index) {
+    if (pos + 18 > response.payload.size()) {
+      impl_->error = "invalid fetch response header";
+      impl_->pending_messages.clear();
+      return std::nullopt;
+    }
+    core::Message message;
+    message.offset = Get64(response.payload, pos);
+    message.timestamp_ms = static_cast<std::int64_t>(Get64(response.payload, pos + 8));
+    pos += 16;
+    const auto key_size = Get16(response.payload, pos);
+    pos += 2;
+    if (pos + key_size + 4 > response.payload.size()) {
+      impl_->error = "invalid fetch response key";
+      impl_->pending_messages.clear();
+      return std::nullopt;
+    }
+    message.key.assign(response.payload, pos, key_size);
+    pos += key_size;
+    const auto value_size = Get32(response.payload, pos);
+    pos += 4;
+    if (pos + value_size > response.payload.size()) {
+      impl_->error = "invalid fetch response value";
+      impl_->pending_messages.clear();
+      return std::nullopt;
+    }
+    message.value.assign(response.payload, pos, value_size);
+    pos += value_size;
+    impl_->pending_messages.push_back(std::move(message));
+  }
+  if (pos != response.payload.size() || impl_->pending_messages.empty()) {
+    impl_->error = "invalid fetch response length";
+    impl_->pending_messages.clear();
     return std::nullopt;
   }
-  core::Message message;
-  message.offset = Get64(response.payload, pos);
-  message.timestamp_ms = static_cast<std::int64_t>(Get64(response.payload, pos + 8));
-  pos += 16;
-  const auto key_size = Get16(response.payload, pos);
-  pos += 2;
-  if (pos + key_size + 4 > response.payload.size()) {
-    impl_->error = "invalid fetch response key";
-    return std::nullopt;
-  }
-  message.key.assign(response.payload, pos, key_size);
-  pos += key_size;
-  const auto value_size = Get32(response.payload, pos);
-  pos += 4;
-  if (pos + value_size > response.payload.size()) {
-    impl_->error = "invalid fetch response value";
-    return std::nullopt;
-  }
-  message.value.assign(response.payload, pos, value_size);
+  auto message = std::move(impl_->pending_messages.front());
+  impl_->pending_messages.pop_front();
   impl_->next_offset = message.offset + 1;
   return message;
 }
 bool MqConsumer::commit(std::uint64_t offset) { mq::protocol::Request request; request.command = mq::protocol::Command::kCommitOffset; request.topic = impl_->topic; Put16(&request.payload, static_cast<std::uint16_t>(impl_->group.size())); request.payload.append(impl_->group); Put32(&request.payload, impl_->partition); Put64(&request.payload, offset); mq::protocol::Response response; return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk; }
-void MqConsumer::close() { impl_->Close(); }
+void MqConsumer::close() { impl_->pending_messages.clear(); impl_->Close(); }
 void MqConsumer::setTimeoutMs(std::uint32_t timeout_ms) { impl_->timeout_ms = timeout_ms == 0 ? 5000 : timeout_ms; }
 const std::string& MqConsumer::lastError() const { return impl_->error; }
 }  // namespace mq::client

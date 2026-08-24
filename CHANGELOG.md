@@ -43,6 +43,7 @@
 ### P3 消费基准与大响应修复
 - Broker Fetch 响应按协议 payload 上限裁剪，TcpConnection 写队列支持受容量限制的完整大帧，修复 256B 消息多分区消费在约 64KiB 响应处超时。
 - bench 消费读取 Topic 实际分区数，批量提交消费位点并在结束时补交最后位点；每次 bench 进程使用唯一 Producer ID，避免跨场景幂等缓存误命中。
+- SDK Consumer 缓存一次 Fetch 返回的整批消息，避免每次 `poll()` 丢弃同一响应的其余消息，消除百万消息消费的重复网络开销。
 - Windows Debug CTest 11/11、WSL2 Linux CTest 12/12、WSL2 ASan/UBSan CTest 12/12 通过；Windows/WSL2 1,000 条 TCP 生产消费验证通过。
 
 ### 测试构建修复
