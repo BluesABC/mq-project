@@ -91,7 +91,50 @@ tools/run_bench_matrix.sh build-linux 1000000 3
 tools/check_bench_matrix.sh bench-results-<timestamp>.csv 3
 ```
 
-### 4.3 VM16 Linux 生产矩阵记录
+### 4.3 VM16 完整验收命令与结果
+
+以下命令按 VM16 实际验收顺序执行，项目和数据均位于 VM 本地 Linux 磁盘：
+
+```bash
+# 1. 拉取远端 main
+cd ~/mq-project
+git pull --ff-only origin main
+
+# 2. Release 配置、构建与全量测试
+cmake -S . -B build-vm16 \
+  -DMQ_BUILD_TESTS=ON \
+  -DMQ_BUILD_SERVER=ON \
+  -DMQ_BUILD_BENCH=ON \
+  -DMQ_BUILD_TOOLS=ON \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build-vm16 -j"$(nproc)"
+ctest --test-dir build-vm16 --output-on-failure
+
+# 3. 终端一启动 Broker
+./build-vm16/mq_broker --config conf/broker.conf
+
+# 4. 终端二执行生产与消费基线
+cd ~/mq-project
+topic="vm16_consume_final_$(date +%Y%m%d%H%M%S)"
+group="vm16_consume_final_group_$(date +%Y%m%d%H%M%S)"
+./build-vm16/mq_bench produce \
+  --topic "$topic" --messages 1000000 --size 256 \
+  --connections 3 --batch 1000 --partitions 3
+./build-vm16/mq_bench consume \
+  --topic "$topic" --group "$group" --messages 1000000 \
+  --connections 3 --batch 1000 --partitions 3
+
+# 5. 管理查询与优雅停机
+./build-vm16/mq_admin topics
+./build-vm16/mq_admin metrics
+# 回到 Broker 终端按 Ctrl+C，或执行：
+kill -TERM "$(pgrep -n mq_broker)"
+ss -ltnp | grep 9092 || true
+```
+
+验收结果：`git pull` 成功；Release 构建成功；CTest `12/12` 全部通过；5 个生产矩阵场景各 3 轮完成 1,000,000 条并通过门禁；消费基线完成 1,000,000 条，TPS `723902`，平均延迟 `3.79205us`，p50 `0.07us`，p99 `0.401us`，p999 `998.266us`；Broker 收到 SIGTERM/SIGINT 后停止监听并优雅退出。
+
+### 4.4 VM16 Linux 生产矩阵记录
 
 - 环境：VMware VM16 Linux Release，项目位于 VM 本地 Linux 磁盘 `/home/lzh/mq-project`；Broker `127.0.0.1:9092`。
 - 原始结果：`bench-results-20260824-203936.csv`。

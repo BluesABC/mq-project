@@ -34,7 +34,7 @@ ctest --test-dir build --output-on-failure
 
 ### 5.1 性能与 sanitizer
 - [x] Linux 标准矩阵生产场景脚本与结果完整性/回归门禁（`tools/check_bench_matrix.sh`）
-- [ ] 固定硬件正式基线：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区
+- [x] 固定硬件正式基线：VM16 Linux Release 完成 batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区生产矩阵及 1,000,000 条消费基线
 - [x] Linux ASan/UBSan 构建并运行全量 CTest
 - [x] WSL2 Linux Debug 构建并运行全量 CTest
 
