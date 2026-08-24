@@ -88,6 +88,12 @@ endif()
 
 if(MQ_BUILD_TESTS)
   enable_testing()
+  # 测试代码使用断言表达验收条件，Release 测试也必须保留这些检查。
+  if(MSVC)
+    add_compile_options(/UNDEBUG)
+  else()
+    add_compile_options(-UNDEBUG)
+  endif()
   add_executable(mq_core_tests test/unit/core_protocol_storage_test.cc)
   target_link_libraries(mq_core_tests PRIVATE mq_core mq_protocol)
   target_include_directories(mq_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

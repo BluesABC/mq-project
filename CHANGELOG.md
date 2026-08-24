@@ -40,6 +40,10 @@
 - 新增 `tools/check_bench_matrix.sh`，校验矩阵场景、重复轮次、TPS 和 p99 阈值。
 - 增加历史 WSL2 结果的保守基线与 Linux CTest fixture；Linux 普通和 sanitizer CTest 均为 12/12 通过。
 
+### 测试构建修复
+- Release 构建的 CTest 目标强制取消 `NDEBUG`，避免测试断言被编译掉后继续使用无效数据。
+- 修复 VM16 Linux Release 下 `mq_core_tests` 因空协议帧触发 `std::out_of_range` 的问题。
+
 ### 项目状态
 - P1 基础链路、P2 复制与故障切换已落地；P3 已开始接入可观测性基础能力。
 
