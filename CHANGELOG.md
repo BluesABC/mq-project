@@ -26,6 +26,11 @@
 - 超过配额返回 `QUOTA_EXCEEDED`；批量请求在写入前一次性检查，避免产生部分批次。
 - `METRICS` 新增配额配置和当前窗口聚合使用量指标，并增加对应单测。
 
+### P3 管理工具
+- 新增 `mq_admin topics`，查询 Topic 名称与分区数。
+- 新增 `mq_admin metrics`，输出 Prometheus 文本指标；复用 SDK 超时、重连和协议编解码。
+- Windows、WSL2 Linux 及 WSL2 ASan/UBSan CTest 均通过，新增管理工具帮助命令测试。
+
 ### 项目状态
 - P1 基础链路、P2 复制与故障切换已落地；P3 已开始接入可观测性基础能力。
 

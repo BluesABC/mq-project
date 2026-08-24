@@ -14,6 +14,8 @@ int main() {
   mq::network::TcpServer server(0, 2, [&broker](const mq::protocol::Request& request) { return broker.Handle(request); });
   assert(server.Start());
   mq::client::MqProducer producer; assert(producer.connect("localhost", server.port())); assert(producer.createTopic("client", 1));
+  std::vector<mq::client::TopicInfo> topics; assert(producer.listTopics(&topics)); assert(topics.size() == 1 && topics[0].name == "client" && topics[0].partitions == 1);
+  std::string metrics; assert(producer.metrics(&metrics)); assert(metrics.find("mq_requests_total ") != std::string::npos);
   mq::client::ProduceResult result; assert(producer.produce("client", "key", "one", mq::client::AckMode::kOne, &result)); assert(result.offset == 0);
   std::vector<mq::client::ProducerMessage> batch{{"key", "two"}, {"key", "three"}}; std::vector<mq::client::ProduceResult> results;
   assert(producer.produceBatch("client", batch, mq::client::AckMode::kOne, &results)); assert(results.size() == 2 && results[0].offset == 1 && results[1].offset == 2);

@@ -17,6 +17,7 @@ endif()
 
 option(MQ_BUILD_TESTS "Build unit & integration tests" OFF)
 option(MQ_BUILD_BENCH "Build benchmark binaries" OFF)
+option(MQ_BUILD_TOOLS "Build operational tools" ON)
 option(MQ_BUILD_SERVER "Build broker server binary" ON)
 option(MQ_ENABLE_SANITIZERS "Enable ASan and UBSan for GCC/Clang" OFF)
 
@@ -65,6 +66,12 @@ if(MQ_BUILD_BENCH)
   add_executable(mq_bench bench/mq_bench.cc)
   target_link_libraries(mq_bench PRIVATE mq_client Threads::Threads)
   target_include_directories(mq_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+endif()
+
+if(MQ_BUILD_TOOLS)
+  add_executable(mq_admin tools/mq_admin.cc)
+  target_link_libraries(mq_admin PRIVATE mq_client)
+  target_include_directories(mq_admin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
 
 add_library(mq_network
@@ -130,4 +137,8 @@ if(MQ_BUILD_TESTS)
   target_link_libraries(mq_replication_client_tests PRIVATE mq_server mq_network)
   target_include_directories(mq_replication_client_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME mq_replication_client_tests COMMAND mq_replication_client_tests)
+
+  if(MQ_BUILD_TOOLS)
+    add_test(NAME mq_admin_help COMMAND mq_admin --help)
+  endif()
 endif()

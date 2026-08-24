@@ -14,6 +14,7 @@ namespace mq::client {
 enum class AckMode { kZero, kOne, kAll };
 struct ProduceResult { std::uint32_t partition = 0; std::uint64_t offset = 0; };
 struct ProducerMessage { std::string key; std::string value; };
+struct TopicInfo { std::string name; std::uint32_t partitions = 0; };
 
 class MqProducer {
  public:
@@ -29,6 +30,8 @@ class MqProducer {
   bool produceBatch(const std::string& topic, const std::vector<ProducerMessage>& messages,
                     AckMode ack = AckMode::kOne, std::vector<ProduceResult>* results = nullptr);
   bool flush();
+  bool listTopics(std::vector<TopicInfo>* topics);
+  bool metrics(std::string* output);
   void close();
   void setTimeoutMs(std::uint32_t timeout_ms);
   void setProducerId(std::uint64_t producer_id);

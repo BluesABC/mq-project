@@ -117,6 +117,32 @@ bool MqProducer::produceBatch(const std::string& topic, const std::vector<Produc
   if (results) { results->clear(); std::size_t pos = 4; for (std::size_t i = 0; i < messages.size(); ++i) { if (pos + 12 > response.payload.size()) return false; results->push_back({Get32(response.payload, pos), Get64(response.payload, pos + 4)}); pos += 12; } } return true;
 }
 bool MqProducer::flush() { mq::protocol::Request request; request.command = mq::protocol::Command::kHeartbeat; mq::protocol::Response response; return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk; }
+bool MqProducer::listTopics(std::vector<TopicInfo>* topics) {
+  if (topics == nullptr) return false;
+  mq::protocol::Request request; request.command = mq::protocol::Command::kListTopic;
+  mq::protocol::Response response;
+  if (!impl_->Call(request, &response) || response.status != mq::protocol::Status::kOk || response.payload.size() < 4) return false;
+  const auto count = Get32(response.payload, 0);
+  if (count > 100000) { impl_->error = "too many topics"; return false; }
+  topics->clear(); topics->reserve(count);
+  std::size_t position = 4;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (position + 2 > response.payload.size()) { impl_->error = "invalid topic response"; return false; }
+    const auto name_size = Get16(response.payload, position); position += 2;
+    if (position + name_size + 4 > response.payload.size()) { impl_->error = "invalid topic response"; return false; }
+    TopicInfo topic; topic.name.assign(response.payload, position, name_size); position += name_size;
+    topic.partitions = Get32(response.payload, position); position += 4; topics->push_back(std::move(topic));
+  }
+  if (position != response.payload.size()) { impl_->error = "invalid topic response"; return false; }
+  return true;
+}
+bool MqProducer::metrics(std::string* output) {
+  if (output == nullptr) return false;
+  mq::protocol::Request request; request.command = mq::protocol::Command::kMetrics;
+  mq::protocol::Response response;
+  if (!impl_->Call(request, &response) || response.status != mq::protocol::Status::kOk) return false;
+  *output = std::move(response.payload); return true;
+}
 void MqProducer::close() { impl_->Close(); }
 void MqProducer::setTimeoutMs(std::uint32_t timeout_ms) { impl_->timeout_ms = timeout_ms == 0 ? 5000 : timeout_ms; }
 void MqProducer::setProducerId(std::uint64_t producer_id) { impl_->producer_id = producer_id; }

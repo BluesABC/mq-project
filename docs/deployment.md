@@ -87,14 +87,18 @@ Follower 将 `replica_role` 设为 `follower`，并把 Leader 放入 `replica_pe
 
 ## 5. 运维操作
 
-### 5.1 常用命令（`tools/` 规划）
+### 5.1 常用命令
 ```bash
+build/mq_admin topics --host 127.0.0.1 --port 9092
+build/mq_admin metrics --host 127.0.0.1 --port 9092
 tools/mq-topic create <topic> --partitions 8
 tools/mq-topic list
 tools/mq-topic delete <topic>
 tools/mq-check --data-dir /var/lib/mq          # 数据目录完整性检查（CRC/索引）
 tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
 ```
+
+`mq_admin topics` 查询 Topic 名称和分区数，`mq_admin metrics` 输出可直接交给 Prometheus exporter 的文本指标。两者均为只读操作，支持 `--timeout-ms` 控制请求超时。
 
 ### 5.2 容量规划
 | 参数 | 参考公式 |

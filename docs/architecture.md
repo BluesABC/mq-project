@@ -187,3 +187,5 @@ Broker 通过 `METRICS(0x04)` 提供只读 Prometheus 文本指标，覆盖请�
 Broker 支持按秒生产请求限流，默认值为 0（关闭）。限流在 Broker 入口执行，批量请求按请求计数，复制内部请求绕过该限制；超过窗口返回 `RATE_LIMITED`，由客户端退避重试。
 
 Broker 支持按 Topic 的生产字节配额，默认值为 0（关闭）。配额窗口为 1 秒，统计新增消息的 key/value 字节；单条消息在 WAL 写入前检查，批量请求先完成整批解析和配额预留后再逐条写入，复制内部请求绕过配额。超限返回 `QUOTA_EXCEEDED`，并通过 `METRICS` 暴露配置值和当前窗口聚合用量。
+
+P3 提供 `mq_admin` 只读管理工具：`topics` 复用 `LIST_TOPIC` 查询 Topic 元数据，`metrics` 复用 `METRICS` 输出 Prometheus 文本；工具使用 SDK 的连接超时和自动重连能力，不增加额外监听端口或第三方依赖。
