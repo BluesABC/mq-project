@@ -1,16 +1,16 @@
 # mq-project 性能基线报告
 
-> 状态: P3 Linux 生产矩阵样本已记录，正式硬件基线待确认 · 2026-08-24 更新
+> 状态: P3 VM16 Linux 生产矩阵已记录，消费 1,000,000 条基线待在 VM16 补测 · 2026-08-24 更新
 > 基准环境与复现步骤见 §4；数据刷新后更新版本号与日期。
 
 ## 1. 基线摘要
 
 | 指标 | 目标（PRD §5.1） | 实测 | 结论 |
 |------|------------------|------|------|
-| 生产吞吐 (batch=1000, 3 分区) | ≥ 10w TPS | 256 B 单连接 257,637 TPS；4 KiB/10 连接 147,034 TPS | 达到样本目标 |
-| 消费吞吐（多分区并行） | ≥ 10w TPS | TBD | - |
-| 生产 p50 / p99 | < 1ms / < 5ms | 256 B/batch=1000 单连接 p50 约 2.7us，p99 约 4.4us | 达到样本目标 |
-| 消费 p99 | < 10ms | TBD | - |
+| 生产吞吐 (batch=1000, 3 分区) | ≥ 10w TPS | VM16：256 B/单连接 605,479 TPS；4 KiB/10 连接 137,965 TPS | 达到样本目标 |
+| 消费吞吐（多分区并行） | ≥ 10w TPS | VM16 1,000,000 条待补测；WSL2 1,000 条功能验证 4,803.93 TPS | 待正式基线 |
+| 生产 p50 / p99 | < 1ms / < 5ms | VM16：256 B/batch=1000 单连接 p50 约 1.46us，p99 约 2.66us | 达到样本目标 |
+| 消费 p99 | < 10ms | WSL2 1,000 条验证 p99 约 1,181us；VM16 1,000,000 条待补测 | 待正式基线 |
 | 5w 连接内存占用/连接 | ≤ 1KB 空闲 | TBD | - |
 | 写入放大 | ≤ 2× | TBD | - |
 
@@ -18,11 +18,12 @@
 
 | 场景 | 说明 | 吞吐 | p50 | p99 | p999 |
 |------|------|------|-----|-----|------|
-| 生产 batch=1 | 256 B/1 连接/3 分区 | 6,267 TPS | 约 141us | 约 442us | 约 922us |
-| 生产 batch=100 | 256 B/1 连接/3 分区 | 227,089 TPS | 约 3.3us | 约 7.6us | 约 10.4us |
-| 生产 batch=1000 | 256 B/1 连接/3 分区 | 257,637 TPS | 约 2.8us | 约 4.4us | 约 5.5us |
-| 生产 batch=1000 | 4096 B/10 连接/3 分区 | 147,034 TPS | 约 62.8us | 约 167.8us | 约 210.2us |
-| 消费顺序读 | 热段 | TBD | | | |
+| 生产 batch=1 | 256 B/1 连接/3 分区，VM16 | 5,079 TPS | 约 177us | 约 709us | 约 1,380us |
+| 生产 batch=100 | 256 B/1 连接/3 分区，VM16 | 374,668 TPS | 约 2.28us | 约 8.81us | 约 17.64us |
+| 生产 batch=1000 | 256 B/1 连接/3 分区，VM16 | 605,479 TPS | 约 1.46us | 约 2.66us | 约 4.49us |
+| 生产 batch=1000 | 256 B/10 连接/3 分区，VM16 | 830,343 TPS | 约 10.77us | 约 32.17us | 约 46.71us |
+| 生产 effective batch=251 | 4096 B/10 连接/3 分区，VM16 | 137,965 TPS | 约 66.56us | 约 211.49us | 约 443.78us |
+| 消费顺序读 | WSL2 热段，1,000 条/3 分区/3 连接 | 4,804 TPS | 约 349us | 约 1,181us | 约 30,338us |
 | 消费随机 offset | 冷段/索引定位 | TBD | | | |
 | 长轮询消费 | 空队列挂起 | TBD | | | |
 
@@ -88,6 +89,20 @@ tools/run_bench_matrix.sh build-linux 1000000 3
 ```bash
 tools/check_bench_matrix.sh bench-results-<timestamp>.csv 3
 ```
+
+### 4.3 VM16 Linux 生产矩阵记录
+
+- 环境：VMware VM16 Linux Release，项目位于 VM 本地 Linux 磁盘 `/home/lzh/mq-project`；Broker `127.0.0.1:9092`。
+- 原始结果：`bench-results-20260824-203936.csv`。
+- 以上表格取每个场景 3 轮中位数；5 个生产场景均完成 1,000,000 条消息，矩阵回归门禁通过。
+- 消费基线需先生产一个保留 Topic，再执行：
+
+```bash
+./build-vm16/mq_bench produce --topic vm16_consume_baseline --messages 1000000 --size 256 --connections 3 --batch 1000 --partitions 3
+./build-vm16/mq_bench consume --topic vm16_consume_baseline --group vm16_bench_group --messages 1000000 --connections 3 --partitions 3
+```
+
+- 2026-08-24 已修复大 Fetch 响应超过 64KiB 网络写缓冲、bench 幂等 ID 跨场景复用和逐条提交位点问题；VM16 消费命令需使用本次修复后重新构建的 `mq_bench`/`mq_broker` 再记录结果。
 
 ## 5. 回归判定
 

@@ -38,6 +38,26 @@ bool Parse(int argc, char** argv, Options* options) {
   }
   return options->messages > 0 && options->size > 0;
 }
+bool ResolveTopicPartitions(const Options& options, std::uint32_t* partitions, std::string* error) {
+  mq::client::MqProducer producer;
+  if (!producer.connect(options.host, options.port)) {
+    if (error != nullptr) *error = producer.lastError().empty() ? "connect failed" : producer.lastError();
+    return false;
+  }
+  std::vector<mq::client::TopicInfo> topics;
+  if (!producer.listTopics(&topics)) {
+    if (error != nullptr) *error = producer.lastError().empty() ? "list topics failed" : producer.lastError();
+    return false;
+  }
+  for (const auto& topic : topics) {
+    if (topic.name == options.topic && topic.partitions > 0) {
+      *partitions = topic.partitions;
+      return true;
+    }
+  }
+  if (error != nullptr) *error = "topic not found";
+  return false;
+}
 bool TryCountMessage(std::atomic<std::uint64_t>* completed, std::uint64_t limit) {
   auto current = completed->load(std::memory_order_relaxed);
   while (current < limit &&
@@ -72,6 +92,8 @@ int main(int argc, char** argv) {
   if (effective_batch == 0) { std::cerr << "message size exceeds protocol payload limit\n"; return 2; }
   options.batch = effective_batch;
   const auto start = std::chrono::steady_clock::now(); std::mutex latency_mutex; std::mutex error_mutex; std::string worker_error; std::vector<double> latencies; std::atomic<std::uint64_t> completed{0}; std::atomic<std::uint64_t> next_message{0}; std::atomic<bool> failed{false}; std::vector<std::uint64_t> producer_completed(options.connections, 0); std::vector<std::thread> workers;
+  const auto producer_id_base = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count());
   auto record_worker_error = [&](std::uint32_t connection, const std::exception& exception) {
     std::lock_guard lock(error_mutex);
     if (worker_error.empty()) {
@@ -83,11 +105,23 @@ int main(int argc, char** argv) {
   };
   try {
   if (options.mode == "produce") {
-    mq::client::MqProducer setup; if (!setup.connect(options.host, options.port)) { std::cerr << "connect failed: " << setup.lastError() << '\n'; return 1; }
-    setup.createTopic(options.topic, options.partitions); setup.close();
+    mq::client::MqProducer setup;
+    if (!setup.connect(options.host, options.port)) { std::cerr << "connect failed: " << setup.lastError() << '\n'; return 1; }
+    if (!setup.createTopic(options.topic, options.partitions)) {
+      std::uint32_t existing_partitions = 0;
+      std::string error;
+      setup.close();
+      if (!ResolveTopicPartitions(options, &existing_partitions, &error)) {
+        std::cerr << "create topic failed: " << (error.empty() ? "unknown error" : error) << '\n';
+        return 1;
+      }
+      options.partitions = existing_partitions;
+    } else {
+      setup.close();
+    }
     for (std::uint32_t connection = 0; connection < options.connections; ++connection) workers.emplace_back([&, connection] {
       try {
-        mq::client::MqProducer producer; producer.setProducerId(1000 + connection); if (!producer.connect(options.host, options.port)) { failed = true; return; }
+        mq::client::MqProducer producer; producer.setProducerId(producer_id_base + connection); if (!producer.connect(options.host, options.port)) { failed = true; return; }
         std::uint64_t done = 0;
         while (!failed.load()) {
           const auto begin_message = next_message.fetch_add(options.batch);
@@ -107,19 +141,50 @@ int main(int argc, char** argv) {
       }
     });
   } else {
-    for (std::uint32_t connection = 0; connection < options.connections; ++connection) workers.emplace_back([&, connection] {
+    std::string topic_error;
+    if (!ResolveTopicPartitions(options, &options.partitions, &topic_error)) {
+      std::cerr << "consume setup failed: " << topic_error << '\n';
+      return 1;
+    }
+    const auto worker_count = std::min(options.connections, options.partitions);
+    for (std::uint32_t connection = 0; connection < worker_count; ++connection) workers.emplace_back([&, connection] {
       try {
-        mq::client::MqConsumer consumer; if (!consumer.connect(options.host, options.port) || !consumer.subscribe(options.topic, options.group + "_" + std::to_string(connection), connection % options.partitions)) { failed = true; return; }
+        mq::client::MqConsumer consumer;
+        if (!consumer.connect(options.host, options.port)) {
+          record_worker_error(connection, std::runtime_error(consumer.lastError().empty() ? "connect failed" : consumer.lastError()));
+          return;
+        }
+        if (!consumer.subscribe(options.topic, options.group + "_" + std::to_string(connection), connection)) {
+          record_worker_error(connection, std::runtime_error("subscribe failed"));
+          return;
+        }
         auto idle_since = std::chrono::steady_clock::now();
+        std::uint64_t last_offset = 0;
+        bool has_uncommitted_offset = false;
+        std::uint64_t consumed_by_worker = 0;
         while (completed.load() < options.messages && !failed.load()) {
           const auto begin = std::chrono::steady_clock::now(); auto message = consumer.poll(1000);
           if (!message) {
-            if (std::chrono::steady_clock::now() - idle_since > std::chrono::seconds(10)) { failed = true; break; }
+            if (std::chrono::steady_clock::now() - idle_since > std::chrono::seconds(10)) {
+              const auto detail = consumer.lastError().empty() ? "no messages received before idle timeout" : consumer.lastError();
+              record_worker_error(connection, std::runtime_error(detail));
+              break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1)); continue;
           }
           idle_since = std::chrono::steady_clock::now();
-          if (!consumer.commit(message->offset + 1)) { failed = true; break; }
+          last_offset = message->offset + 1;
+          has_uncommitted_offset = true;
+          ++consumed_by_worker;
+          if (consumed_by_worker % options.batch == 0 && !consumer.commit(last_offset)) {
+            record_worker_error(connection, std::runtime_error(consumer.lastError().empty() ? "commit failed" : consumer.lastError()));
+            break;
+          }
+          if (consumed_by_worker % options.batch == 0) has_uncommitted_offset = false;
           if (TryCountMessage(&completed, options.messages)) { std::lock_guard lock(latency_mutex); latencies.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count()); }
+        }
+        if (has_uncommitted_offset && !failed.load() && !consumer.commit(last_offset)) {
+          record_worker_error(connection, std::runtime_error(consumer.lastError().empty() ? "commit failed" : consumer.lastError()));
         }
         consumer.close();
       } catch (const std::exception& exception) {

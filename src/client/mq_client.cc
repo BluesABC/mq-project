@@ -157,7 +157,51 @@ bool MqConsumer::connect(const std::string& host, std::uint16_t port) { impl_->h
 bool MqConsumer::connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints) { if (endpoints.empty()) return false; impl_->endpoints = endpoints; impl_->endpoint_index = 0; impl_->Close(); return impl_->Connect(); }
 bool MqConsumer::subscribe(const std::string& topic, const std::string& group) { return subscribe(topic, group, 0); }
 bool MqConsumer::subscribe(const std::string& topic, const std::string& group, std::uint32_t partition) { impl_->topic = topic; impl_->group = group; impl_->partition = partition; impl_->next_offset = 0; return !topic.empty() && !group.empty(); }
-std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) { mq::protocol::Request request; request.command = mq::protocol::Command::kFetch; request.topic = impl_->topic; Put32(&request.payload, impl_->partition); Put64(&request.payload, impl_->next_offset); Put32(&request.payload, 1024 * 1024); const auto old = impl_->timeout_ms; impl_->timeout_ms = timeout_ms == 0 ? old : timeout_ms; mq::protocol::Response response; const bool okay = impl_->Call(request, &response); impl_->timeout_ms = old; if (!okay || response.status != mq::protocol::Status::kOk || response.payload.size() < 4 || Get32(response.payload, 0) == 0) return std::nullopt; std::size_t pos = 4; if (pos + 18 > response.payload.size()) return std::nullopt; core::Message message; message.offset = Get64(response.payload, pos); message.timestamp_ms = static_cast<std::int64_t>(Get64(response.payload, pos + 8)); pos += 16; const auto key_size = Get16(response.payload, pos); pos += 2; if (pos + key_size + 4 > response.payload.size()) return std::nullopt; message.key.assign(response.payload, pos, key_size); pos += key_size; const auto value_size = Get32(response.payload, pos); pos += 4; if (pos + value_size > response.payload.size()) return std::nullopt; message.value.assign(response.payload, pos, value_size); impl_->next_offset = message.offset + 1; return message; }
+std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kFetch;
+  request.topic = impl_->topic;
+  Put32(&request.payload, impl_->partition);
+  Put64(&request.payload, impl_->next_offset);
+  Put32(&request.payload, 1024 * 1024);
+  const auto old = impl_->timeout_ms;
+  impl_->timeout_ms = timeout_ms == 0 ? old : timeout_ms;
+  mq::protocol::Response response;
+  const bool okay = impl_->Call(request, &response);
+  impl_->timeout_ms = old;
+  if (!okay) return std::nullopt;
+  if (response.status != mq::protocol::Status::kOk) {
+    impl_->error = "fetch failed with status " + std::to_string(static_cast<unsigned>(response.status));
+    return std::nullopt;
+  }
+  if (response.payload.size() < 4 || Get32(response.payload, 0) == 0) return std::nullopt;
+  std::size_t pos = 4;
+  if (pos + 18 > response.payload.size()) {
+    impl_->error = "invalid fetch response header";
+    return std::nullopt;
+  }
+  core::Message message;
+  message.offset = Get64(response.payload, pos);
+  message.timestamp_ms = static_cast<std::int64_t>(Get64(response.payload, pos + 8));
+  pos += 16;
+  const auto key_size = Get16(response.payload, pos);
+  pos += 2;
+  if (pos + key_size + 4 > response.payload.size()) {
+    impl_->error = "invalid fetch response key";
+    return std::nullopt;
+  }
+  message.key.assign(response.payload, pos, key_size);
+  pos += key_size;
+  const auto value_size = Get32(response.payload, pos);
+  pos += 4;
+  if (pos + value_size > response.payload.size()) {
+    impl_->error = "invalid fetch response value";
+    return std::nullopt;
+  }
+  message.value.assign(response.payload, pos, value_size);
+  impl_->next_offset = message.offset + 1;
+  return message;
+}
 bool MqConsumer::commit(std::uint64_t offset) { mq::protocol::Request request; request.command = mq::protocol::Command::kCommitOffset; request.topic = impl_->topic; Put16(&request.payload, static_cast<std::uint16_t>(impl_->group.size())); request.payload.append(impl_->group); Put32(&request.payload, impl_->partition); Put64(&request.payload, offset); mq::protocol::Response response; return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk; }
 void MqConsumer::close() { impl_->Close(); }
 void MqConsumer::setTimeoutMs(std::uint32_t timeout_ms) { impl_->timeout_ms = timeout_ms == 0 ? 5000 : timeout_ms; }

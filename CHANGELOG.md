@@ -40,6 +40,11 @@
 - 新增 `tools/check_bench_matrix.sh`，校验矩阵场景、重复轮次、TPS 和 p99 阈值。
 - 增加历史 WSL2 结果的保守基线与 Linux CTest fixture；Linux 普通和 sanitizer CTest 均为 12/12 通过。
 
+### P3 消费基准与大响应修复
+- Broker Fetch 响应按协议 payload 上限裁剪，TcpConnection 写队列支持受容量限制的完整大帧，修复 256B 消息多分区消费在约 64KiB 响应处超时。
+- bench 消费读取 Topic 实际分区数，批量提交消费位点并在结束时补交最后位点；每次 bench 进程使用唯一 Producer ID，避免跨场景幂等缓存误命中。
+- Windows Debug CTest 11/11、WSL2 Linux CTest 12/12、WSL2 ASan/UBSan CTest 12/12 通过；Windows/WSL2 1,000 条 TCP 生产消费验证通过。
+
 ### 测试构建修复
 - Release 构建的 CTest 目标强制取消 `NDEBUG`，避免测试断言被编译掉后继续使用无效数据。
 - 修复 VM16 Linux Release 下 `mq_core_tests` 因空协议帧触发 `std::out_of_range` 的问题。

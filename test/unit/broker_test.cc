@@ -278,11 +278,39 @@ void ReplicatesContiguousMessages() {
   std::filesystem::remove_all(follower_root, error);
 }
 
+void LimitsFetchResponseToProtocolPayload() {
+  const auto root = std::filesystem::temp_directory_path() / "mq_project_fetch_limit_test";
+  std::error_code error;
+  std::filesystem::remove_all(root, error);
+  mq::server::Broker broker(root);
+  assert(broker.Open());
+  assert(broker.Handle(CreateTopicRequest(1, "fetch-limit", 1)).status == mq::protocol::Status::kOk);
+
+  for (std::uint32_t index = 0; index < 5000; ++index) {
+    auto request = ProduceRequest(index + 2, "key", std::string(256, 'x'));
+    request.topic = "fetch-limit";
+    assert(broker.Handle(request).status == mq::protocol::Status::kOk);
+  }
+
+  auto request = FetchRequest(6000, 0);
+  request.topic = "fetch-limit";
+  request.payload.clear();
+  Put32(&request.payload, 0);
+  Put64(&request.payload, 0);
+  Put32(&request.payload, 1024 * 1024);
+  const auto response = broker.Handle(request);
+  assert(response.status == mq::protocol::Status::kOk);
+  assert(response.payload.size() <= mq::protocol::kMaxPayloadBytes);
+  assert(Get32(response.payload, 0) > 0);
+  std::filesystem::remove_all(root, error);
+}
+
 }  // namespace
 
 int main() {
   CreateProduceFetch();
   RestoresTopicMetadata();
   ReplicatesContiguousMessages();
+  LimitsFetchResponseToProtocolPayload();
   return 0;
 }

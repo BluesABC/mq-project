@@ -173,7 +173,7 @@ read 缓冲（默认 64KB 可增长） → 解析循环：
 - Reactor 线程只做 socket read/write 和流式帧边界解码；完整请求投递 Worker 线程执行 Broker 业务处理，避免网络线程执行阻塞 IO 或业务计算。
 - 解码产物（Request）通过 MPMC 队列投递到 Worker 池。
 
-当前已实现 `TcpConnection` 的固定容量读写缓冲与 owner-loop 状态约束：Reactor 只调用 `OnReadable` 和消费已写字节，Worker 通过 `Send` 回投写任务；连接持有 MemoryPool 所有权，关闭后的异步写回不会访问悬垂缓冲。
+当前已实现 `TcpConnection` 的固定容量读缓冲、受容量限制的写队列与 owner-loop 状态约束：Reactor 只调用 `OnReadable` 和消费已写字节，Worker 通过 `Send` 回投写任务。写队列按完整响应帧入队，容量上限覆盖协议最大响应帧，避免大 Fetch 响应因 64KB 固定写缓冲被截断；连接仍持有 MemoryPool 所有权，关闭后的异步写回不会访问悬垂缓冲。
 
 ### 2.5 连接状态机
 

@@ -594,15 +594,26 @@ protocol::Response Broker::HandleFetch(const protocol::Request& request) {
     return MakeResponse(request, protocol::Status::kStorageError);
   }
   std::string response_payload;
-  Put32(&response_payload, static_cast<std::uint32_t>(messages.size()));
+  Put32(&response_payload, 0);
+  std::uint32_t response_count = 0;
   for (const auto& message : messages) {
+    const auto record_size = 8ULL + 8ULL + 2ULL + message.key.size() + 4ULL + message.value.size();
+    if (record_size > protocol::kMaxPayloadBytes - 4 ||
+        response_payload.size() > protocol::kMaxPayloadBytes - 4 - record_size) {
+      break;
+    }
     Put64(&response_payload, message.offset);
     Put64(&response_payload, static_cast<std::uint64_t>(message.timestamp_ms));
     Put16(&response_payload, static_cast<std::uint16_t>(message.key.size()));
     response_payload.append(message.key);
     Put32(&response_payload, static_cast<std::uint32_t>(message.value.size()));
     response_payload.append(message.value);
+    ++response_count;
   }
+  response_payload[0] = static_cast<char>(response_count >> 24);
+  response_payload[1] = static_cast<char>(response_count >> 16);
+  response_payload[2] = static_cast<char>(response_count >> 8);
+  response_payload[3] = static_cast<char>(response_count);
   return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
 }
 

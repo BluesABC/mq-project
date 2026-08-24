@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -43,7 +44,10 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
   EventLoop* const loop_;
   std::shared_ptr<core::MemoryPool> pool_owner_;
   Buffer read_buffer_;
-  Buffer write_buffer_;
+  const std::size_t write_capacity_;
+  std::deque<std::string> write_queue_;
+  std::size_t queued_write_bytes_ = 0;
+  std::size_t front_write_offset_ = 0;
   ReadCallback read_callback_;
   protocol::RequestStreamDecoder decoder_;
   std::atomic<bool> open_{true};
