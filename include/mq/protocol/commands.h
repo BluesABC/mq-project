@@ -34,6 +34,7 @@ enum class Status : std::uint8_t {
   kVersionMismatch = 0x15,
   kNotSupported = 0x16,
   kNotLeader = 0x17,
+  kRateLimited = 0x18,
   kInternalError = 0x20,
 };
 

@@ -114,7 +114,9 @@ tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
   | 队列积压 | > 100MB 持续 10min | warning |
   | 写缓冲水位 | > 80% | warning |
   | 数据目录剩余 | < 20% | critical |
-  | 连接数 | > 80% × max_connections | warning |
+| 连接数 | > 80% × max_connections | warning |
+
+生产保护：配置 `produce_rate_limit` 为每秒允许的 PRODUCE/PRODUCE_BATCH 请求数，`0` 表示不限流。超过限制时 Broker 返回 `RATE_LIMITED`，客户端应按退避策略重试；复制内部请求不受该限制影响。
 
 ### 5.4 日志
 - 日志级别与输出见 `AGENTS.md` §3.5；建议生产配置 `info`。

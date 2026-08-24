@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -34,6 +35,7 @@ class Broker {
   bool Open(std::string* error = nullptr);
   void ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers,
                             std::size_t quorum = 0, bool follower = false);
+  void ConfigureRateLimit(std::uint64_t produce_requests_per_second);
   void StartReplication();
   void StopReplication();
   bool Flush(std::string* error = nullptr);
@@ -44,7 +46,7 @@ class Broker {
   protocol::Response HandleListTopic(const protocol::Request& request);
   protocol::Response HandleMetrics(const protocol::Request& request);
   protocol::Response HandleDeleteTopic(const protocol::Request& request);
-  protocol::Response HandleProduce(const protocol::Request& request);
+  protocol::Response HandleProduce(const protocol::Request& request, bool enforce_rate_limit = true);
   protocol::Response HandleProduceBatch(const protocol::Request& request);
   protocol::Response HandleFetch(const protocol::Request& request);
   protocol::Response HandleCommitOffset(const protocol::Request& request);
@@ -55,6 +57,7 @@ class Broker {
   protocol::Response MakeResponse(const protocol::Request& request, protocol::Status status,
                                   std::string payload = {}) const;
   bool Replicate(const std::string& topic, std::uint32_t partition, const core::Message& message);
+  bool AllowProduceRequest();
 
   core::StorageEngine storage_;
   core::TopicMetadataStore metadata_store_;
@@ -80,6 +83,10 @@ class Broker {
   std::atomic<std::uint64_t> produce_count_{0};
   std::atomic<std::uint64_t> fetch_count_{0};
   std::atomic<std::uint64_t> error_count_{0};
+  std::mutex rate_limit_mutex_;
+  std::uint64_t produce_rate_limit_ = 0;
+  std::uint64_t produce_window_count_ = 0;
+  std::chrono::steady_clock::time_point produce_window_start_ = std::chrono::steady_clock::now();
   void ReplicationLoop();
 };
 

@@ -77,6 +77,26 @@ void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPe
   for (const auto& peer : replication_peers_) replication_coordinator_->RegisterReplica(peer.node_id);
 }
 
+void Broker::ConfigureRateLimit(std::uint64_t produce_requests_per_second) {
+  std::lock_guard lock(rate_limit_mutex_);
+  produce_rate_limit_ = produce_requests_per_second;
+  produce_window_count_ = 0;
+  produce_window_start_ = std::chrono::steady_clock::now();
+}
+
+bool Broker::AllowProduceRequest() {
+  std::lock_guard lock(rate_limit_mutex_);
+  if (produce_rate_limit_ == 0) return true;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - produce_window_start_ >= std::chrono::seconds(1)) {
+    produce_window_start_ = now;
+    produce_window_count_ = 0;
+  }
+  if (produce_window_count_ >= produce_rate_limit_) return false;
+  ++produce_window_count_;
+  return true;
+}
+
 void Broker::StartReplication() {
   if (replication_thread_.joinable()) return;
   stop_replication_.store(false, std::memory_order_release);
@@ -404,11 +424,13 @@ protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, metrics.str());
 }
 
-protocol::Response Broker::HandleProduce(const protocol::Request& request) {
+protocol::Response Broker::HandleProduce(const protocol::Request& request, bool enforce_rate_limit) {
   if ((request.flags & protocol::kFlagReplication) == 0 &&
       replication_coordinator_->role() != ReplicaRole::kLeader) {
     return MakeResponse(request, protocol::Status::kNotLeader);
   }
+  if (enforce_rate_limit && (request.flags & protocol::kFlagReplication) == 0 && !AllowProduceRequest())
+    return MakeResponse(request, protocol::Status::kRateLimited);
   std::string_view payload = request.payload;
   std::size_t position = 0;
   std::uint64_t producer_id = 0, sequence = 0;
@@ -472,6 +494,11 @@ bool Broker::Replicate(const std::string& topic, std::uint32_t partition, const 
 }
 
 protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) {
+  if ((request.flags & protocol::kFlagReplication) == 0 &&
+      replication_coordinator_->role() != ReplicaRole::kLeader)
+    return MakeResponse(request, protocol::Status::kNotLeader);
+  if ((request.flags & protocol::kFlagReplication) == 0 && !AllowProduceRequest())
+    return MakeResponse(request, protocol::Status::kRateLimited);
   if (!(request.flags & protocol::kFlagProducerMetadata)) return MakeResponse(request, protocol::Status::kNotSupported);
   std::string_view payload = request.payload; std::size_t position = 0;
   if (!Take(payload, &position, 20)) return MakeResponse(request, protocol::Status::kBadRequest);
@@ -492,7 +519,7 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
     if (is_cached[i]) { if (cached[i].payload.size() != 12) return MakeResponse(request, protocol::Status::kInternalError); response_payload.append(cached[i].payload); continue; }
     protocol::Request single = request; single.command = protocol::Command::kProduce; single.flags = (request.flags & ~protocol::kFlagProducerMetadata) | protocol::kFlagProducerMetadata;
     std::string single_payload; Put64(&single_payload, producer_id); Put64(&single_payload, first_sequence + i); Put32(&single_payload, 0xFFFFFFFFu); Put16(&single_payload, key_size); single_payload.append(payload.substr(key_position, key_size)); Put32(&single_payload, value_size); single_payload.append(payload.substr(value_position, value_size)); single.payload = std::move(single_payload);
-    const auto result = HandleProduce(single);
+    const auto result = HandleProduce(single, false);
     if (result.status != protocol::Status::kOk) return MakeResponse(request, result.status);
     response_payload.append(result.payload);
   }

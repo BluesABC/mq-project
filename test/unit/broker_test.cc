@@ -193,6 +193,9 @@ void CreateProduceFetch() {
   assert(metrics.payload.find("mq_requests_total ") != std::string::npos);
   assert(metrics.payload.find("mq_produce_total 3") != std::string::npos);
   assert(metrics.payload.find("mq_fetch_total 1") != std::string::npos);
+  broker.ConfigureRateLimit(1);
+  assert(broker.Handle(ProduceRequest(8, "rate-1", "allowed")).status == mq::protocol::Status::kOk);
+  assert(broker.Handle(ProduceRequest(9, "rate-2", "limited")).status == mq::protocol::Status::kRateLimited);
   std::filesystem::remove_all(root, error);
 }
 

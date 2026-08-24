@@ -22,6 +22,7 @@ struct Config {
   std::size_t sub_reactor_threads = 0;
   std::uint64_t segment_size = 64ULL * 1024 * 1024;
   std::uint64_t retention_hours = 168;
+  std::uint64_t produce_rate_limit = 0;
   std::filesystem::path log_file;
   std::string node_id = "node-local";
   bool replica_follower = false;
@@ -49,6 +50,7 @@ bool LoadConfig(const std::filesystem::path& path, Config* config, std::string* 
     else if (key == "sub_reactor_threads" && Number(value, &number)) config->sub_reactor_threads = static_cast<std::size_t>(number);
     else if (key == "segment_size" && ParseSize(value, &config->segment_size)) {}
     else if (key == "retention_hours" && Number(value, &config->retention_hours)) {}
+    else if (key == "produce_rate_limit" && Number(value, &config->produce_rate_limit)) {}
     else if (key == "log_file") config->log_file = value;
     else if (key == "node_id") config->node_id = value;
     else if (key == "replica_role") config->replica_follower = value == "follower";
@@ -83,6 +85,7 @@ int main(int argc, char** argv) {
   mq::server::Broker broker(config.data_dir, storage_config);
   if (!broker.Open(&error)) { logger.Log(mq::core::LogLevel::kCritical, error); return 1; }
   broker.ConfigureReplication(config.node_id, config.replica_peers, 0, config.replica_follower);
+  broker.ConfigureRateLimit(config.produce_rate_limit);
   broker.StartReplication();
   mq::network::TcpServer server(config.bind_address, config.bind_port, config.sub_reactor_threads, [&broker](const mq::protocol::Request& request) { return broker.Handle(request); });
   if (!server.Start()) { logger.Log(mq::core::LogLevel::kCritical, "cannot start broker server"); return 1; }

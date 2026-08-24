@@ -86,6 +86,7 @@ P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求�
 | 0x15 | VERSION_MISMATCH |
 | 0x16 | NOT_SUPPORTED |
 | 0x17 | NOT_LEADER |
+| 0x18 | RATE_LIMITED |
 | 0x20 | INTERNAL_ERROR |
 
 ## 4.1 版本协商

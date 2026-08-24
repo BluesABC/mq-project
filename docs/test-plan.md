@@ -75,6 +75,11 @@ ctest --test-dir build --output-on-failure
 - [x] 多数派 commit index 与 ack=all
 - [x] 多 endpoint 客户端收到 NOT_LEADER 后切换
 
+### 4.3 P3 生产保护与指标
+- [x] `METRICS` 返回 Prometheus 文本指标
+- [x] 生产请求按秒限流，超限返回 `RATE_LIMITED`
+- [x] 批量生产按请求计数，复制内部请求不受生产限流影响
+
 ## 4. 集成测试用例（P1 起）
 
 - [x] 进程内 Broker：创建 Topic → 生产 → 拉取消息
