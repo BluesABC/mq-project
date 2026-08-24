@@ -13,6 +13,15 @@ TcpConnection::TcpConnection(std::uint64_t id, EventLoop* loop, core::MemoryPool
   }
 }
 
+TcpConnection::TcpConnection(std::uint64_t id, EventLoop* loop, std::shared_ptr<core::MemoryPool> pool,
+                             std::size_t read_capacity, std::size_t write_capacity)
+    : id_(id), loop_(loop), pool_owner_(std::move(pool)),
+      read_buffer_(pool_owner_.get(), read_capacity), write_buffer_(pool_owner_.get(), write_capacity) {
+  if (loop_ == nullptr || !loop_->IsInLoopThread()) {
+    throw std::invalid_argument("connection must be created by its event loop owner");
+  }
+}
+
 void TcpConnection::SetReadCallback(ReadCallback callback) {
   if (!loop_->IsInLoopThread()) throw std::logic_error("read callback must be set by owner thread");
   read_callback_ = std::move(callback);

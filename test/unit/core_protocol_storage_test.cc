@@ -1,8 +1,10 @@
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
+#include "mq/core/consumer_offset_store.h"
 #include "mq/core/storage_engine.h"
 #include "mq/protocol/protocol_codec.h"
 
@@ -104,6 +106,77 @@ void SegmentsIndexesAndRetention() {
   std::filesystem::remove_all(root, ec);
 }
 
+void RecoveryDropsCorruptAndTruncatedTail() {
+  const auto root = std::filesystem::temp_directory_path() / "mq_project_recovery_test";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  const auto log = root / "queues" / "6f7264657273" / "0" / "00000000000000000000.log";
+  {
+    mq::core::StorageEngine storage(root);
+    assert(storage.Open());
+    mq::core::Message message;
+    assert(storage.Append("orders", 0, "k", "one", &message));
+    assert(storage.Append("orders", 0, "k", "two", &message));
+    assert(storage.Flush());
+  }
+  {
+    std::fstream file(log, std::ios::in | std::ios::out | std::ios::binary);
+    assert(file);
+    file.seekg(-1, std::ios::end);
+    char byte = 0;
+    file.get(byte);
+    file.seekp(-1, std::ios::end);
+    file.put(static_cast<char>(byte ^ 0x7F));
+  }
+  {
+    mq::core::StorageEngine storage(root);
+    assert(storage.Open());
+    std::vector<mq::core::Message> messages;
+    assert(storage.Read("orders", 0, 0, 1024, &messages));
+    assert(messages.size() == 1 && messages.front().value == "one");
+  }
+
+  const auto truncated_root = std::filesystem::temp_directory_path() / "mq_project_truncated_test";
+  std::filesystem::remove_all(truncated_root, ec);
+  const auto truncated_log = truncated_root / "queues" / "6f7264657273" / "0" /
+                             "00000000000000000000.log";
+  {
+    mq::core::StorageEngine storage(truncated_root);
+    assert(storage.Open());
+    mq::core::Message message;
+    assert(storage.Append("orders", 0, "k", "one", &message));
+    assert(storage.Append("orders", 0, "k", "two", &message));
+    assert(storage.Flush());
+  }
+  assert(std::filesystem::file_size(truncated_log) > 3);
+  std::filesystem::resize_file(truncated_log, std::filesystem::file_size(truncated_log) - 3);
+  {
+    mq::core::StorageEngine storage(truncated_root);
+    assert(storage.Open());
+    std::vector<mq::core::Message> messages;
+    assert(storage.Read("orders", 0, 0, 1024, &messages));
+    assert(messages.size() == 1 && messages.front().value == "one");
+  }
+  std::filesystem::remove_all(root, ec);
+  std::filesystem::remove_all(truncated_root, ec);
+}
+
+void ConsumerOffsetsPersistAtomicallyAndIndependently() {
+  const auto root = std::filesystem::temp_directory_path() / "mq_project_offset_store_test";
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  mq::core::ConsumerOffsetStore store(root / "metadata" / "consumer_offsets.meta");
+  assert(store.Save({{"group-a", "orders", 0, 12}, {"group-b", "orders", 0, 4}}));
+  std::vector<mq::core::ConsumerOffset> offsets;
+  assert(store.Load(&offsets));
+  assert(offsets.size() == 2);
+  assert(offsets[0].group == "group-a" && offsets[0].offset == 12);
+  assert(offsets[1].group == "group-b" && offsets[1].offset == 4);
+  assert(std::filesystem::exists(root / "metadata" / "consumer_offsets.meta"));
+  assert(!std::filesystem::exists(root / "metadata" / "consumer_offsets.meta.tmp"));
+  std::filesystem::remove_all(root, ec);
+}
+
 }  // namespace
 
 int main() {
@@ -111,5 +184,7 @@ int main() {
   RequestStreamDecoding();
   StorageRoundTrip();
   SegmentsIndexesAndRetention();
+  RecoveryDropsCorruptAndTruncatedTail();
+  ConsumerOffsetsPersistAtomicallyAndIndependently();
   return 0;
 }

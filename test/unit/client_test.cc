@@ -19,8 +19,14 @@ int main() {
   mq::client::ProduceResult result; assert(producer.produce("client", "key", "one", mq::client::AckMode::kOne, &result)); assert(result.offset == 0);
   std::vector<mq::client::ProducerMessage> batch{{"key", "two"}, {"key", "three"}}; std::vector<mq::client::ProduceResult> results;
   assert(producer.produceBatch("client", batch, mq::client::AckMode::kOne, &results)); assert(results.size() == 2 && results[0].offset == 1 && results[1].offset == 2);
+  assert(producer.produce("client", "key", "fire-and-forget", mq::client::AckMode::kZero));
+  assert(producer.flush());
+  assert(!producer.produce("client", "key", "quorum-required", mq::client::AckMode::kAll));
   mq::client::MqConsumer consumer; assert(consumer.connect("localhost", server.port())); assert(consumer.subscribe("client", "group"));
   auto first = consumer.poll(); assert(first.has_value() && first->value == "one"); assert(consumer.commit(1));
+  auto second = consumer.poll(); auto third = consumer.poll();
+  assert(second.has_value() && second->value == "two");
+  assert(third.has_value() && third->value == "three");
   const auto follower_root = root / "endpoint-follower";
   const auto leader_root = root / "endpoint-leader";
   mq::server::Broker follower(follower_root); assert(follower.Open());

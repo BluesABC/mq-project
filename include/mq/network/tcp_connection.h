@@ -21,6 +21,8 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
 
   TcpConnection(std::uint64_t id, EventLoop* loop, core::MemoryPool* pool,
                 std::size_t read_capacity, std::size_t write_capacity);
+  TcpConnection(std::uint64_t id, EventLoop* loop, std::shared_ptr<core::MemoryPool> pool,
+                std::size_t read_capacity, std::size_t write_capacity);
 
   std::uint64_t id() const { return id_; }
   bool IsOpen() const { return open_.load(std::memory_order_acquire); }
@@ -39,6 +41,7 @@ class TcpConnection : public std::enable_shared_from_this<TcpConnection> {
 
   const std::uint64_t id_;
   EventLoop* const loop_;
+  std::shared_ptr<core::MemoryPool> pool_owner_;
   Buffer read_buffer_;
   Buffer write_buffer_;
   ReadCallback read_callback_;

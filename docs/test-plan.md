@@ -22,8 +22,8 @@ ctest --test-dir build --output-on-failure
 
 ### 3.1 存储引擎 `storage_engine_test`
 - [x] 追加/读取往返一致（含跨段回卷）
-- [ ] CRC 损坏检测
-- [ ] 崩溃恢复（截断半条记录）
+- [x] CRC 损坏检测
+- [x] 崩溃恢复（截断半条记录）
 - [x] 稀疏索引定位正确性
 - [x] 段滚动、按大小保留清理与跨段读取
 
@@ -33,7 +33,7 @@ ctest --test-dir build --output-on-failure
 - [x] ack=0 / ack=1 / ack=all 语义
 
 ### 5.1 性能与 sanitizer
-- [ ] Linux 标准矩阵：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区
+- [ ] Linux 标准矩阵：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区（需固定硬件并刷新性能基线）
 - [x] Linux ASan/UBSan 构建并运行全量 CTest
 - [x] WSL2 Linux Debug 构建并运行全量 CTest
 
@@ -87,10 +87,10 @@ ctest --test-dir build --output-on-failure
 
 - [x] 进程内 Broker：创建 Topic → 生产 → 拉取消息
 - [x] 进程内 Broker：创建 Topic → 重启 → Topic 元数据恢复
-- [ ] 单 Broker：生产 N 条 → 消费 N 条顺序一致
-- [ ] 多消费者组位点独立提交
-- [ ] 重启后数据恢复（WAL replay）
-- [ ] ack=all / ack=1 / ack=0 语义
+- [x] 单 Broker：生产 N 条 → 消费 N 条顺序一致
+- [x] 多消费者组位点独立提交
+- [x] 重启后数据恢复（WAL replay）
+- [x] ack=all / ack=1 / ack=0 语义
 
 ## 5. 压测项（P1 起，`bench`）
 

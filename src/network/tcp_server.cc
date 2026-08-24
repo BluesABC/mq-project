@@ -63,7 +63,7 @@ struct TcpServer::Impl {
       SOCKET socket = accept(listener, nullptr, nullptr); if (socket == INVALID_SOCKET) break;
       u_long one = 1; if (ioctlsocket(socket, FIONBIO, &one) != 0) { closesocket(socket); continue; }
       Client client; client.pool = std::make_shared<core::MemoryPool>(128 * 1024);
-      client.connection = std::make_shared<TcpConnection>(next_id++, &loop, client.pool.get(), 64 * 1024, 64 * 1024);
+      client.connection = std::make_shared<TcpConnection>(next_id++, &loop, client.pool, 64 * 1024, 64 * 1024);
       clients.emplace(socket, std::move(client));
     }
     char input[8192]; std::vector<SOCKET> closed;
@@ -155,7 +155,7 @@ struct TcpServer::Impl {
   }
   void AddClient(SubReactor* sub, int fd) {
     auto pool = std::make_shared<core::MemoryPool>(128 * 1024);
-    Client client{pool, std::make_shared<TcpConnection>(next_id++, &sub->loop, pool.get(), 64 * 1024, 64 * 1024)};
+    Client client{pool, std::make_shared<TcpConnection>(next_id++, &sub->loop, pool, 64 * 1024, 64 * 1024)};
     const auto inserted = sub->clients.emplace(fd, std::move(client));
     if (!inserted.second) {
       close(fd);

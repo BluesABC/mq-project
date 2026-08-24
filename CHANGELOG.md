@@ -31,6 +31,11 @@
 - 新增 `mq_admin metrics`，输出 Prometheus 文本指标；复用 SDK 超时、重连和协议编解码。
 - Windows、WSL2 Linux 及 WSL2 ASan/UBSan CTest 均通过，新增管理工具帮助命令测试。
 
+### P3 稳定性验证
+- 增加 CRC 损坏尾部和半条 WAL 记录恢复测试，增加消费者位点快照独立性测试。
+- 增加客户端顺序消费及 `ack=0`、`ack=1`、`ack=all` 语义测试。
+- 修复连接关闭后异步响应仍访问已释放 `MemoryPool` 的生命周期竞态；Windows、WSL2 Linux、WSL2 ASan/UBSan CTest 均为 11/11 通过。
+
 ### 项目状态
 - P1 基础链路、P2 复制与故障切换已落地；P3 已开始接入可观测性基础能力。
 

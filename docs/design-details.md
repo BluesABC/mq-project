@@ -141,7 +141,7 @@ Main Reactor（1 线程）         Sub Reactor × N（N = CPU 核数）
 
 - 连接与 Reactor 线程绑定：一个连接的所有事件固定在同一线程处理，天然无锁。
 - 每个 Sub Reactor 配一个 **写任务队列**（MPMC），Worker 的响应经此队列投递，由 Reactor 线程触发写。
-- 当前 `EventLoop` 已提供固定 owner 线程与有界跨线程任务投递；socket 事件注册将在 `TcpServer`/`TcpConnection` 接入时叠加到该线程归属模型上。
+- `EventLoop` 提供固定 owner 线程与有界跨线程任务投递；`TcpServer` 已将 socket 事件注册和连接分发接入该线程归属模型。
 - `EventLoop` 的 idle 回调在 owner 线程执行并以 5ms 等待窗口唤醒；Windows `select` 兜底和 Linux epoll 后端将通过该回调驱动，不得另起线程直接操作连接。
 - Windows 当前实现使用非阻塞 Winsock + `select`：accept、连接表、流解码和 socket 写入均在 EventLoop owner 线程；完整请求投递 Worker，Worker 只调用 Handler 并通过 `TcpConnection::Send` 回投响应。
 
@@ -170,10 +170,10 @@ read 缓冲（默认 64KB 可增长） → 解析循环：
   3) 完整 → 交 Handler；不完整 → 保留残帧，等待下次 EPOLLIN
 ```
 
-- 协议解码在 **Worker 线程**完成（Reactor 线程只做 read/write，不做业务解析，满足"网络层不做阻塞 IO"约束）。
+- Reactor 线程只做 socket read/write 和流式帧边界解码；完整请求投递 Worker 线程执行 Broker 业务处理，避免网络线程执行阻塞 IO 或业务计算。
 - 解码产物（Request）通过 MPMC 队列投递到 Worker 池。
 
-当前已实现 `TcpConnection` 的固定容量读写缓冲与 owner-loop 状态约束：Reactor 只调用 `OnReadable` 和消费已写字节，Worker 通过 `Send` 回投写任务。socket read/write 注册尚未接入。
+当前已实现 `TcpConnection` 的固定容量读写缓冲与 owner-loop 状态约束：Reactor 只调用 `OnReadable` 和消费已写字节，Worker 通过 `Send` 回投写任务；连接持有 MemoryPool 所有权，关闭后的异步写回不会访问悬垂缓冲。
 
 ### 2.5 连接状态机
 
@@ -251,6 +251,7 @@ Reactor 收到完整帧 ──► MPMC 任务队列 ──► Worker 池
 
 - 明确禁止：Reactor 线程内同步等待 Worker；Worker 内直接操作 socket。
 - 连接生命周期用 `shared_ptr<TcpConnection>`，避免异步回调中悬垂。
+- 服务端连接同时持有其 `MemoryPool` 的 `shared_ptr`；连接从 Reactor client 表移除后，排队的异步写回仍可能执行，不能让缓冲池先于连接引用释放。
 
 ---
 
