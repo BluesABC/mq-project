@@ -140,5 +140,10 @@ if(MQ_BUILD_TESTS)
 
   if(MQ_BUILD_TOOLS)
     add_test(NAME mq_admin_help COMMAND mq_admin --help)
+    if(UNIX)
+      add_test(NAME mq_bench_matrix_checker
+               COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_bench_matrix.sh
+                       ${CMAKE_CURRENT_SOURCE_DIR}/tools/bench-results.fixture.csv 3)
+    endif()
   endif()
 endif()

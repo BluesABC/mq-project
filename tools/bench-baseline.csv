@@ -1,0 +1,6 @@
+scenario,min_tps,max_p99_us
+produce_256_b1_c1_p3,4198,938
+produce_256_b100_c1_p3,173940,16
+produce_256_b1000_c1_p3,202026,11
+produce_256_b1000_c10_p3,23518,1130
+produce_4096_b1000_c10_p3,97076,1088

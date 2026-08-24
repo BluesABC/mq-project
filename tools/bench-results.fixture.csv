@@ -1,0 +1,16 @@
+scenario,repeat,output
+produce_256_b1_c1_p3,1,bench_version=3 TPS=5247.61 p99_us=429.976 p999_us=620.929
+produce_256_b1_c1_p3,2,bench_version=3 TPS=6266.8 p99_us=468.802 p999_us=1010.88
+produce_256_b1_c1_p3,3,bench_version=3 TPS=6431.11 p99_us=441.627 p999_us=922.408
+produce_256_b100_c1_p3,1,bench_version=3 TPS=227089 p99_us=7.43709 p999_us=10.4005
+produce_256_b100_c1_p3,2,bench_version=3 TPS=227904 p99_us=7.55201 p999_us=11.2416
+produce_256_b100_c1_p3,3,bench_version=3 TPS=217425 p99_us=7.71967 p999_us=9.93215
+produce_256_b1000_c1_p3,1,bench_version=3 TPS=261818 p99_us=3.81312 p999_us=4.72169
+produce_256_b1000_c1_p3,2,bench_version=3 TPS=252533 p99_us=4.44418 p999_us=5.59067
+produce_256_b1000_c1_p3,3,bench_version=3 TPS=257637 p99_us=5.0286 p999_us=5.54459
+produce_256_b1000_c10_p3,1,bench_version=3 TPS=29397.9 p99_us=564.432 p999_us=635.811
+produce_256_b1000_c10_p3,2,bench_version=3 TPS=380918 p99_us=213.134 p999_us=284.698
+produce_256_b1000_c10_p3,3,bench_version=3 TPS=457393 p99_us=91.6481 p999_us=189.923
+produce_4096_b1000_c10_p3,1,bench_version=3 TPS=155277 p99_us=167.802 p999_us=664.232
+produce_4096_b1000_c10_p3,2,bench_version=3 TPS=121346 p99_us=543.686 p999_us=799.605
+produce_4096_b1000_c10_p3,3,bench_version=3 TPS=147034 p99_us=135.443 p999_us=210.182

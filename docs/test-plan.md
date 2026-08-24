@@ -33,7 +33,8 @@ ctest --test-dir build --output-on-failure
 - [x] ack=0 / ack=1 / ack=all 语义
 
 ### 5.1 性能与 sanitizer
-- [ ] Linux 标准矩阵：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区（需固定硬件并刷新性能基线）
+- [x] Linux 标准矩阵生产场景脚本与结果完整性/回归门禁（`tools/check_bench_matrix.sh`）
+- [ ] 固定硬件正式基线：batch=1/100/1000、connections=1/10、256 B/4096 B、3 分区
 - [x] Linux ASan/UBSan 构建并运行全量 CTest
 - [x] WSL2 Linux Debug 构建并运行全量 CTest
 

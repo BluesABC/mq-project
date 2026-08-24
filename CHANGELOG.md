@@ -36,6 +36,10 @@
 - 增加客户端顺序消费及 `ack=0`、`ack=1`、`ack=all` 语义测试。
 - 修复连接关闭后异步响应仍访问已释放 `MemoryPool` 的生命周期竞态；Windows、WSL2 Linux、WSL2 ASan/UBSan CTest 均为 11/11 通过。
 
+### P3 性能回归门禁
+- 新增 `tools/check_bench_matrix.sh`，校验矩阵场景、重复轮次、TPS 和 p99 阈值。
+- 增加历史 WSL2 结果的保守基线与 Linux CTest fixture；Linux 普通和 sanitizer CTest 均为 12/12 通过。
+
 ### 项目状态
 - P1 基础链路、P2 复制与故障切换已落地；P3 已开始接入可观测性基础能力。
 

@@ -32,6 +32,7 @@
 
 - [ ] 压测结果刷新至 `docs/performance-baseline.md`
 - [ ] 与上一版本基线对比无回归（吞吐 ≥ 80% 基线，p99 ≤ 2× 基线）
+- [ ] `tools/check_bench_matrix.sh bench-results-<timestamp>.csv 3` 通过
 - [ ] 性能敏感代码改动已进 `bench/`
 
 ## 5. 质量与安全
