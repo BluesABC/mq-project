@@ -13,6 +13,7 @@ enum class Command : std::uint8_t {
   kCreateTopic = 0x01,
   kDeleteTopic = 0x02,
   kListTopic = 0x03,
+  kMetrics = 0x04,
   kProduce = 0x10,
   kProduceBatch = 0x11,
   kFetch = 0x20,

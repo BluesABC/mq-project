@@ -167,36 +167,48 @@ bool Broker::Open(std::string* error) {
 }
 
 protocol::Response Broker::Handle(const protocol::Request& request) {
+  request_count_.fetch_add(1, std::memory_order_relaxed);
   if (!opened_) {
+    error_count_.fetch_add(1, std::memory_order_relaxed);
     core::Logger::Instance().Log(core::LogLevel::kError, "broker request received before open");
     return MakeResponse(request, protocol::Status::kInternalError);
   }
+  if (request.command == protocol::Command::kProduce || request.command == protocol::Command::kProduceBatch) {
+    produce_count_.fetch_add(1, std::memory_order_relaxed);
+  } else if (request.command == protocol::Command::kFetch) {
+    fetch_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  protocol::Response response;
   switch (request.command) {
     case protocol::Command::kCreateTopic:
-      return HandleCreateTopic(request);
+      response = HandleCreateTopic(request); break;
     case protocol::Command::kListTopic:
-      return HandleListTopic(request);
+      response = HandleListTopic(request); break;
+    case protocol::Command::kMetrics:
+      response = HandleMetrics(request); break;
     case protocol::Command::kDeleteTopic:
-      return HandleDeleteTopic(request);
+      response = HandleDeleteTopic(request); break;
     case protocol::Command::kProduce:
-      return HandleProduce(request);
+      response = HandleProduce(request); break;
     case protocol::Command::kProduceBatch:
-      return HandleProduceBatch(request);
+      response = HandleProduceBatch(request); break;
     case protocol::Command::kFetch:
-      return HandleFetch(request);
+      response = HandleFetch(request); break;
     case protocol::Command::kCommitOffset:
-      return HandleCommitOffset(request);
+      response = HandleCommitOffset(request); break;
     case protocol::Command::kHeartbeat:
-      return HandleHeartbeat(request);
+      response = HandleHeartbeat(request); break;
     case protocol::Command::kReplicaFetch:
-      return HandleReplicaFetch(request);
+      response = HandleReplicaFetch(request); break;
     case protocol::Command::kReplicaAppend:
-      return HandleReplicaAppend(request);
+      response = HandleReplicaAppend(request); break;
     case protocol::Command::kReplicaVote:
-      return HandleReplicaVote(request);
+      response = HandleReplicaVote(request); break;
     default:
-      return MakeResponse(request, protocol::Status::kBadRequest);
+      response = MakeResponse(request, protocol::Status::kBadRequest); break;
   }
+  if (response.status != protocol::Status::kOk) error_count_.fetch_add(1, std::memory_order_relaxed);
+  return response;
 }
 
 bool Broker::Flush(std::string* error) {
@@ -362,6 +374,34 @@ protocol::Response Broker::HandleListTopic(const protocol::Request& request) {
     Put32(&payload, topic.partition_count);
   }
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
+}
+
+protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
+  if (!request.topic.empty() || !request.payload.empty() || (request.flags & protocol::kFlagReplication) != 0)
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  std::string role = "unknown";
+  if (replication_coordinator_) {
+    switch (replication_coordinator_->role()) {
+      case ReplicaRole::kLeader: role = "leader"; break;
+      case ReplicaRole::kFollower: role = "follower"; break;
+      case ReplicaRole::kCandidate: role = "candidate"; break;
+    }
+  }
+  std::ostringstream metrics;
+  metrics << "# TYPE mq_requests_total counter\n"
+          << "mq_requests_total " << request_count_.load(std::memory_order_relaxed) << "\n"
+          << "# TYPE mq_produce_total counter\n"
+          << "mq_produce_total " << produce_count_.load(std::memory_order_relaxed) << "\n"
+          << "# TYPE mq_fetch_total counter\n"
+          << "mq_fetch_total " << fetch_count_.load(std::memory_order_relaxed) << "\n"
+          << "# TYPE mq_errors_total counter\n"
+          << "mq_errors_total " << error_count_.load(std::memory_order_relaxed) << "\n"
+          << "# TYPE mq_replication_term gauge\n"
+          << "mq_replication_term " << (replication_coordinator_ ? replication_coordinator_->term() : 0) << "\n"
+          << "# TYPE mq_commit_index gauge\n"
+          << "mq_commit_index " << (replication_coordinator_ ? replication_coordinator_->commitIndex() : 0) << "\n"
+          << "mq_replication_role{role=\"" << role << "\"} 1\n";
+  return MakeResponse(request, protocol::Status::kOk, metrics.str());
 }
 
 protocol::Response Broker::HandleProduce(const protocol::Request& request) {

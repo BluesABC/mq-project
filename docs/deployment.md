@@ -104,7 +104,8 @@ tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
 | 每分区 | 单分区写吞吐受磁盘顺序写限制（约 500MB/s，SSD） |
 
 ### 5.3 监控
-- 指标暴露：`/metrics`（文本）或日志周期输出（见 PRD §5.3 指标清单）。
+- 指标暴露：通过协议 `METRICS(0x04)` 获取 Prometheus 文本；需要 HTTP `/metrics` 时由外部 exporter 转发，避免 Broker 引入第二套监听协议。
+- 当前输出包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index` 和 `mq_replication_role`。
 - 关注项与告警阈值（建议）：
   | 指标 | 阈值 | 级别 |
   |------|------|------|

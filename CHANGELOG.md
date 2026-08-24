@@ -11,8 +11,13 @@
 - Windows Debug CTest 10/10、WSL2 Linux CTest 10/10、WSL2 ASan/UBSan CTest 10/10 通过。
 - WSL2 真实 TCP 冒烟完成 1000 条消息生产并验证 Broker 优雅退出。
 
+### P3 可观测性基础
+- 新增 `METRICS(0x04)` 只读协议命令，返回 Prometheus 文本指标。
+- Broker 统计请求、生产、拉取、错误及复制任期、提交索引和角色。
+- 新增 Broker 指标单测，更新部署与架构文档。
+
 ### 项目状态
-- 完成 P1 进度盘点：基础协议、存储、并发、Broker、Topic 元数据持久化、Windows TCP 验证与日志已落地；消费者组、Linux epoll、SDK、性能基线和高可用尚未完成。
+- P1 基础链路、P2 复制与故障切换已落地；P3 已开始接入可观测性基础能力。
 
 ### P1 Topic 元数据持久化
 - 新增二进制 `topics.meta` 全量快照，保存 Topic 名称和分区数；创建、删除时通过临时文件与原子替换发布。

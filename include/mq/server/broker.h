@@ -42,6 +42,7 @@ class Broker {
  private:
   protocol::Response HandleCreateTopic(const protocol::Request& request);
   protocol::Response HandleListTopic(const protocol::Request& request);
+  protocol::Response HandleMetrics(const protocol::Request& request);
   protocol::Response HandleDeleteTopic(const protocol::Request& request);
   protocol::Response HandleProduce(const protocol::Request& request);
   protocol::Response HandleProduceBatch(const protocol::Request& request);
@@ -75,6 +76,10 @@ class Broker {
   std::mutex replication_mutex_;
   std::thread replication_thread_;
   std::unordered_map<std::string, std::uint64_t> replication_offsets_;
+  std::atomic<std::uint64_t> request_count_{0};
+  std::atomic<std::uint64_t> produce_count_{0};
+  std::atomic<std::uint64_t> fetch_count_{0};
+  std::atomic<std::uint64_t> error_count_{0};
   void ReplicationLoop();
 };
 

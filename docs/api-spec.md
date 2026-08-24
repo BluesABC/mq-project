@@ -44,6 +44,7 @@
 | 0x01 | CREATE_TOPIC | topic + partitions | 无 |
 | 0x02 | DELETE_TOPIC | topic | 无 |
 | 0x03 | LIST_TOPIC | 无 | topic 列表 |
+| 0x04 | METRICS | 无 | Prometheus 文本指标 |
 | 0x10 | PRODUCE | partition + key + value | offset + partition |
 | 0x20 | FETCH | partition + offset + max_bytes | 消息列表 |
 | 0x21 | COMMIT_OFFSET | group + partition + offset | 无 |
@@ -63,6 +64,8 @@
 P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求会被拒绝）：`REPLICA_FETCH(0x40)` 使用与 `FETCH` 相同的请求和响应布局；`REPLICA_APPEND(0x41)` 请求载荷为 `partition(4) | count(4)`，后接重复的消息记录，Follower 只接受连续的 offset；`REPLICA_VOTE(0x42)` 载荷为 `term(8) | candidate_id_len(2) | candidate_id`，用于多数派选举。副本节点必须拒绝低于本地任期的复制请求。
 
 `COMMIT_OFFSET` 请求载荷为 `group_len(2) | group | partition(4) | offset(8)`，Topic 取请求帧中的 `topic` 字段；`HEARTBEAT` 请求载荷为空，成功返回空载荷。
+
+`METRICS` 请求不携带 topic 和 payload，仅允许普通客户端请求，成功响应为 UTF-8 Prometheus 文本格式。指标包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index` 和 `mq_replication_role`。该命令只读，不修改 Broker 状态。
 
 `PRODUCE` 的 SDK 扩展请求在 flags 设置 `PRODUCER_METADATA` 时，载荷前置 `producer_id(8) | sequence(8)`；Broker 按二元组去重并缓存响应。`PRODUCE_BATCH`（0x11）载荷为 `producer_id(8) | first_sequence(8) | count(4)`，后接重复的 `key_len(2) | key | value_len(4) | value`。ack flags：0 为 ack=0，1 为 ack=1，2 为 ack=all；当前 ack=all 返回 `NOT_SUPPORTED`。
 

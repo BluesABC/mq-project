@@ -186,6 +186,13 @@ void CreateProduceFetch() {
   assert(idem.payload == duplicate_idem.payload);
   assert(broker.Handle(CommitRequest(5, "consumer-a", partition, 1)).status == mq::protocol::Status::kOk);
   assert(std::filesystem::exists(root / "metadata" / "consumer_offsets.meta"));
+  mq::protocol::Request metrics_request;
+  metrics_request.command = mq::protocol::Command::kMetrics;
+  const auto metrics = broker.Handle(metrics_request);
+  assert(metrics.status == mq::protocol::Status::kOk);
+  assert(metrics.payload.find("mq_requests_total ") != std::string::npos);
+  assert(metrics.payload.find("mq_produce_total 3") != std::string::npos);
+  assert(metrics.payload.find("mq_fetch_total 1") != std::string::npos);
   std::filesystem::remove_all(root, error);
 }
 
