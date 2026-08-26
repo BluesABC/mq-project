@@ -5,7 +5,9 @@
 namespace mq::core {
 namespace {
 
-bool IsContinuation(unsigned char byte) { return (byte & 0xC0) == 0x80; }
+bool IsContinuation(unsigned char byte) {
+  return (byte & 0xC0) == 0x80;
+}
 
 bool IsValidUtf8(std::string_view value) {
   for (std::size_t index = 0; index < value.size();) {

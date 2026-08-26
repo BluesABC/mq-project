@@ -25,6 +25,8 @@ void* MemoryPool::Allocate(std::size_t size, std::size_t alignment) {
   return memory;
 }
 
-bool MemoryPool::IsOwnerThread() const { return owner_thread_id_ == std::this_thread::get_id(); }
+bool MemoryPool::IsOwnerThread() const {
+  return owner_thread_id_ == std::this_thread::get_id();
+}
 
 }  // namespace mq::core

@@ -1,7 +1,7 @@
+#include "mq/server/replication.h"
+
 #include <cassert>
 #include <chrono>
-
-#include "mq/server/replication.h"
 
 int main() {
   using namespace std::chrono_literals;

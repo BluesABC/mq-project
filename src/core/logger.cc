@@ -42,7 +42,8 @@ bool Logger::SetFile(std::filesystem::path path, std::size_t max_file_bytes, std
   }
   file_path_ = std::move(path);
   max_file_bytes_ = max_file_bytes;
-  file_bytes_ = std::filesystem::exists(file_path_) ? std::filesystem::file_size(file_path_, ec) : 0;
+  file_bytes_ =
+      std::filesystem::exists(file_path_) ? std::filesystem::file_size(file_path_, ec) : 0;
   if (ec) file_bytes_ = 0;
   return true;
 }
@@ -68,7 +69,8 @@ void Logger::Log(LogLevel level, std::string_view message) {
 #endif
   std::ostringstream line;
   line << std::put_time(&local_time, "%Y-%m-%dT%H:%M:%S") << " [" << LevelName(level) << "] ";
-  const std::size_t available = kMaxLineBytes > line.str().size() ? kMaxLineBytes - line.str().size() : 0;
+  const std::size_t available =
+      kMaxLineBytes > line.str().size() ? kMaxLineBytes - line.str().size() : 0;
   line << message.substr(0, available) << '\n';
   const std::string formatted = line.str();
   std::cerr << formatted;
@@ -95,12 +97,18 @@ bool Logger::RotateIfNeeded(std::size_t next_line_bytes) {
 
 std::string_view Logger::LevelName(LogLevel level) {
   switch (level) {
-    case LogLevel::kTrace: return "trace";
-    case LogLevel::kDebug: return "debug";
-    case LogLevel::kInfo: return "info";
-    case LogLevel::kWarn: return "warn";
-    case LogLevel::kError: return "error";
-    case LogLevel::kCritical: return "critical";
+    case LogLevel::kTrace:
+      return "trace";
+    case LogLevel::kDebug:
+      return "debug";
+    case LogLevel::kInfo:
+      return "info";
+    case LogLevel::kWarn:
+      return "warn";
+    case LogLevel::kError:
+      return "error";
+    case LogLevel::kCritical:
+      return "critical";
   }
   return "unknown";
 }

@@ -1,4 +1,4 @@
-#include "mq/network/tcp_connection.h"
+﻿#include "mq/network/tcp_connection.h"
 
 #include <stdexcept>
 #include <utility>
@@ -13,10 +13,14 @@ TcpConnection::TcpConnection(std::uint64_t id, EventLoop* loop, core::MemoryPool
   }
 }
 
-TcpConnection::TcpConnection(std::uint64_t id, EventLoop* loop, std::shared_ptr<core::MemoryPool> pool,
-                             std::size_t read_capacity, std::size_t write_capacity)
-    : id_(id), loop_(loop), pool_owner_(std::move(pool)),
-      read_buffer_(pool_owner_.get(), read_capacity), write_capacity_(write_capacity) {
+TcpConnection::TcpConnection(std::uint64_t id, EventLoop* loop,
+                             std::shared_ptr<core::MemoryPool> pool, std::size_t read_capacity,
+                             std::size_t write_capacity)
+    : id_(id),
+      loop_(loop),
+      pool_owner_(std::move(pool)),
+      read_buffer_(pool_owner_.get(), read_capacity),
+      write_capacity_(write_capacity) {
   if (loop_ == nullptr || !loop_->IsInLoopThread()) {
     throw std::invalid_argument("connection must be created by its event loop owner");
   }
@@ -36,6 +40,7 @@ bool TcpConnection::DecodeRequests(std::string_view bytes, std::vector<protocol:
 bool TcpConnection::OnReadable(std::string_view bytes) {
   if (!loop_->IsInLoopThread() || !IsOpen() || !read_buffer_.Append(bytes)) return false;
   if (!read_callback_) return true;
+  // 回调返回实际消费的字节数，未消费部分保留以支持半包和业务层限速。
   const std::size_t consumed = read_callback_(shared_from_this(), read_buffer_.Readable());
   if (consumed > read_buffer_.readable_bytes()) {
     Close();
@@ -48,6 +53,7 @@ bool TcpConnection::OnReadable(std::string_view bytes) {
 bool TcpConnection::Send(std::string bytes) {
   if (!IsOpen()) return false;
   if (loop_->IsInLoopThread()) return AppendWrite(bytes);
+  // Worker 线程只投递发送任务，避免直接访问由 Reactor 独占的写队列。
   std::shared_ptr<TcpConnection> connection = shared_from_this();
   return loop_->QueueInLoop([connection, bytes = std::move(bytes)] {
     if (connection->IsOpen()) connection->AppendWrite(bytes);

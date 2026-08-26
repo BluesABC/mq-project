@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 #include <condition_variable>
@@ -12,6 +12,7 @@
 
 namespace mq::core {
 
+// Worker 池承接网络线程之外的业务和持久化工作，避免 Reactor 被阻塞。
 class ThreadPool {
  public:
   using Task = std::function<void()>;
@@ -22,6 +23,7 @@ class ThreadPool {
   ThreadPool(const ThreadPool&) = delete;
   ThreadPool& operator=(const ThreadPool&) = delete;
 
+  // 队列满时立即失败，由调用方决定重试或触发背压。
   bool Submit(Task task);
   void Shutdown();
 

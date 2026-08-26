@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 #include <condition_variable>
@@ -13,6 +13,8 @@
 
 namespace mq::network {
 
+// EventLoop 将 fd 事件和跨线程任务串行化到所属 Reactor 线程。
+// 连接对象只能在该线程操作，其他线程必须通过 QueueInLoop 投递任务。
 class EventLoop {
  public:
   using Task = std::function<void()>;
@@ -26,6 +28,7 @@ class EventLoop {
 
   bool Start();
   bool SetIdleCallback(Task callback);
+  // 任务入队后由唤醒 fd/条件变量唤醒 Reactor，调用方不直接碰连接状态。
   bool QueueInLoop(Task task);
   bool RegisterFd(int fd, std::uint32_t events, FdCallback callback);
   bool ModifyFd(int fd, std::uint32_t events);

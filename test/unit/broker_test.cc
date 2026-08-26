@@ -1,10 +1,10 @@
+#include "mq/server/broker.h"
+
 #include <cassert>
 #include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "mq/server/broker.h"
 
 namespace {
 
@@ -154,14 +154,16 @@ mq::protocol::Request IdempotentProduceRequest(std::uint64_t request_id) {
   auto request = ProduceRequest(request_id, "idem", "once");
   request.flags = mq::protocol::kFlagProducerMetadata | mq::protocol::kAckOne;
   std::string metadata;
-  Put64(&metadata, 99); Put64(&metadata, 7); metadata.append(request.payload); request.payload = std::move(metadata);
+  Put64(&metadata, 99);
+  Put64(&metadata, 7);
+  metadata.append(request.payload);
+  request.payload = std::move(metadata);
   return request;
 }
 
-mq::protocol::Request ProduceBatchRequest(std::uint64_t request_id,
-                                          std::uint64_t producer_id,
-                                          std::uint64_t first_sequence,
-                                          const std::vector<std::pair<std::string, std::string>>& messages) {
+mq::protocol::Request ProduceBatchRequest(
+    std::uint64_t request_id, std::uint64_t producer_id, std::uint64_t first_sequence,
+    const std::vector<std::pair<std::string, std::string>>& messages) {
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kProduceBatch;
   request.request_id = request_id;
@@ -205,9 +207,11 @@ void CreateProduceFetch() {
   assert(Get64(fetched.payload, 4) == 0);
   const auto idem = broker.Handle(IdempotentProduceRequest(6));
   const auto duplicate_idem = broker.Handle(IdempotentProduceRequest(7));
-  assert(idem.status == mq::protocol::Status::kOk && duplicate_idem.status == mq::protocol::Status::kOk);
+  assert(idem.status == mq::protocol::Status::kOk &&
+         duplicate_idem.status == mq::protocol::Status::kOk);
   assert(idem.payload == duplicate_idem.payload);
-  assert(broker.Handle(CommitRequest(5, "consumer-a", partition, 1)).status == mq::protocol::Status::kOk);
+  assert(broker.Handle(CommitRequest(5, "consumer-a", partition, 1)).status ==
+         mq::protocol::Status::kOk);
   assert(std::filesystem::exists(root / "metadata" / "consumer_offsets.meta"));
   mq::protocol::Request metrics_request;
   metrics_request.command = mq::protocol::Command::kMetrics;
@@ -218,15 +222,18 @@ void CreateProduceFetch() {
   assert(metrics.payload.find("mq_fetch_total 1") != std::string::npos);
   broker.ConfigureRateLimit(1);
   assert(broker.Handle(ProduceRequest(8, "rate-1", "allowed")).status == mq::protocol::Status::kOk);
-  assert(broker.Handle(ProduceRequest(9, "rate-2", "limited")).status == mq::protocol::Status::kRateLimited);
+  assert(broker.Handle(ProduceRequest(9, "rate-2", "limited")).status ==
+         mq::protocol::Status::kRateLimited);
   broker.ConfigureRateLimit(0);
   broker.ConfigureTopicQuota(7);
   const auto oversized_batch = ProduceBatchRequest(10, 200, 0, {{"a", "123"}, {"b", "123"}});
   assert(broker.Handle(oversized_batch).status == mq::protocol::Status::kQuotaExceeded);
   assert(broker.Handle(ProduceRequest(11, "q", "123")).status == mq::protocol::Status::kOk);
-  assert(broker.Handle(ProduceRequest(12, "q", "123")).status == mq::protocol::Status::kQuotaExceeded);
+  assert(broker.Handle(ProduceRequest(12, "q", "123")).status ==
+         mq::protocol::Status::kQuotaExceeded);
   const auto quota_metrics = broker.Handle(metrics_request);
-  assert(quota_metrics.payload.find("mq_topic_produce_quota_bytes_per_second 7") != std::string::npos);
+  assert(quota_metrics.payload.find("mq_topic_produce_quota_bytes_per_second 7") !=
+         std::string::npos);
   std::filesystem::remove_all(root, error);
 }
 
@@ -270,10 +277,13 @@ void ReplicatesContiguousMessages() {
   const auto partition = Get32(produced.payload, 0);
   const auto fetched = leader.Handle(ReplicaFetchRequest(3, partition, 0));
   assert(fetched.status == mq::protocol::Status::kOk && Get32(fetched.payload, 0) == 1);
-  assert(follower.Handle(ReplicaAppendRequest(4, partition, fetched.payload)).status == mq::protocol::Status::kOk);
+  assert(follower.Handle(ReplicaAppendRequest(4, partition, fetched.payload)).status ==
+         mq::protocol::Status::kOk);
   const auto follower_fetch = follower.Handle(FetchRequest(5, partition));
-  assert(follower_fetch.status == mq::protocol::Status::kOk && Get32(follower_fetch.payload, 0) == 1);
-  assert(follower.Handle(ReplicaAppendRequest(6, partition, fetched.payload)).status == mq::protocol::Status::kInvalidOffset);
+  assert(follower_fetch.status == mq::protocol::Status::kOk &&
+         Get32(follower_fetch.payload, 0) == 1);
+  assert(follower.Handle(ReplicaAppendRequest(6, partition, fetched.payload)).status ==
+         mq::protocol::Status::kInvalidOffset);
   std::filesystem::remove_all(leader_root, error);
   std::filesystem::remove_all(follower_root, error);
 }
@@ -284,7 +294,8 @@ void LimitsFetchResponseToProtocolPayload() {
   std::filesystem::remove_all(root, error);
   mq::server::Broker broker(root);
   assert(broker.Open());
-  assert(broker.Handle(CreateTopicRequest(1, "fetch-limit", 1)).status == mq::protocol::Status::kOk);
+  assert(broker.Handle(CreateTopicRequest(1, "fetch-limit", 1)).status ==
+         mq::protocol::Status::kOk);
 
   for (std::uint32_t index = 0; index < 5000; ++index) {
     auto request = ProduceRequest(index + 2, "key", std::string(256, 'x'));

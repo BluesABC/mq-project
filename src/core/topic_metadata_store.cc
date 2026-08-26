@@ -12,7 +12,8 @@
 #include <windows.h>
 #endif
 
-namespace mq::core { namespace {
+namespace mq::core {
+namespace {
 constexpr std::uint32_t kVersion = 1;
 constexpr std::uint32_t kMaxTopics = 1024;
 
@@ -95,7 +96,8 @@ bool TopicMetadataStore::Save(const std::vector<TopicMetadata>& topics, std::str
   }
 
 #ifdef _WIN32
-  if (!MoveFileExW(temporary.c_str(), path_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+  if (!MoveFileExW(temporary.c_str(), path_.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
     SetError(error, "cannot replace topic metadata");
     return false;
   }

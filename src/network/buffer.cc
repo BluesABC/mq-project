@@ -5,7 +5,8 @@
 
 namespace mq::network {
 
-Buffer::Buffer(core::MemoryPool* pool, std::size_t capacity_bytes) : capacity_bytes_(capacity_bytes) {
+Buffer::Buffer(core::MemoryPool* pool, std::size_t capacity_bytes)
+    : capacity_bytes_(capacity_bytes) {
   if (pool == nullptr || capacity_bytes == 0 || !pool->IsOwnerThread()) {
     throw std::invalid_argument("buffer must be created by its memory pool owner");
   }
@@ -21,7 +22,9 @@ bool Buffer::Append(std::string_view data) {
   return true;
 }
 
-std::string_view Buffer::Readable() const { return std::string_view(data_ + read_position_, readable_bytes()); }
+std::string_view Buffer::Readable() const {
+  return std::string_view(data_ + read_position_, readable_bytes());
+}
 
 void Buffer::Consume(std::size_t bytes) {
   if (bytes >= readable_bytes()) {

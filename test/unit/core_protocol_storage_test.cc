@@ -88,18 +88,20 @@ void SegmentsIndexesAndRetention() {
     assert(storage.Open());
     mq::core::Message message;
     for (int index = 0; index < 12; ++index) {
-      assert(storage.Append("orders", 0, "k", std::string(40, static_cast<char>('a' + index)), &message));
+      assert(storage.Append("orders", 0, "k", std::string(40, static_cast<char>('a' + index)),
+                            &message));
     }
     assert(std::filesystem::exists(root / "queues" / "6f7264657273" / "0" /
-                                    "00000000000000000001.log"));
+                                   "00000000000000000001.log"));
     assert(std::filesystem::exists(root / "queues" / "6f7264657273" / "0" /
-                                    "00000000000000000000.index"));
+                                   "00000000000000000000.index"));
     std::vector<mq::core::Message> messages;
     assert(storage.Read("orders", 0, 8, 1000, &messages));
     assert(messages.size() == 4 && messages.front().offset == 8 && messages.back().offset == 11);
     assert(storage.CleanupExpiredSegments());
     std::size_t log_count = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(root / "queues" / "6f7264657273" / "0"))
+    for (const auto& entry :
+         std::filesystem::directory_iterator(root / "queues" / "6f7264657273" / "0"))
       if (entry.path().extension() == ".log") ++log_count;
     assert(log_count == 1);
   }
@@ -138,8 +140,8 @@ void RecoveryDropsCorruptAndTruncatedTail() {
 
   const auto truncated_root = std::filesystem::temp_directory_path() / "mq_project_truncated_test";
   std::filesystem::remove_all(truncated_root, ec);
-  const auto truncated_log = truncated_root / "queues" / "6f7264657273" / "0" /
-                             "00000000000000000000.log";
+  const auto truncated_log =
+      truncated_root / "queues" / "6f7264657273" / "0" / "00000000000000000000.log";
   {
     mq::core::StorageEngine storage(truncated_root);
     assert(storage.Open());

@@ -1,10 +1,11 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <string>
 
 namespace mq::protocol {
 
+// 协议常量集中定义，避免客户端和 Broker 对帧格式、版本或长度上限产生分歧。
 constexpr std::uint16_t kMagic = 0x4D51;
 constexpr std::uint8_t kCurrentVersion = 1;
 constexpr std::uint32_t kMaxPayloadBytes = 1024 * 1024;
@@ -24,6 +25,7 @@ enum class Command : std::uint8_t {
   kReplicaVote = 0x42,
 };
 
+// 状态码由协议层统一承载，业务层不应直接返回魔法数字。
 enum class Status : std::uint8_t {
   kOk = 0x00,
   kBadRequest = 0x10,
@@ -48,6 +50,7 @@ constexpr std::uint16_t kFlagReplication = 0x0008;
 constexpr std::uint16_t kFlagReplicationTerm = 0x0010;
 
 struct Request {
+  // 请求和响应都携带 request_id，客户端可据此匹配异步响应并实现幂等。
   std::uint8_t version = kCurrentVersion;
   Command command = Command::kHeartbeat;
   std::uint64_t request_id = 0;

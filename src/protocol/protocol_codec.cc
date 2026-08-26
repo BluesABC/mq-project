@@ -1,8 +1,9 @@
-#include "mq/protocol/protocol_codec.h"
+﻿#include "mq/protocol/protocol_codec.h"
 
 namespace mq::protocol {
 namespace {
 
+// 协议统一使用大端序，保证不同 CPU 架构上的客户端可以互通。
 void Put16(std::string* out, std::uint16_t value) {
   out->push_back(static_cast<char>(value >> 8));
   out->push_back(static_cast<char>(value));
@@ -29,6 +30,7 @@ std::uint64_t Get64(std::string_view in, std::size_t pos) {
 }
 bool ValidCommon(std::string_view frame, std::size_t header, std::size_t payload_offset,
                  std::uint8_t version, std::uint32_t payload_len, std::string* error) {
+  // 先校验长度再读取字段，避免恶意长度字段导致越界访问。
   if (frame.size() < header || Get16(frame, 0) != kMagic) {
     if (error != nullptr) *error = "invalid magic or header";
     return false;
@@ -54,22 +56,37 @@ bool CheckString(const std::string& value, std::size_t limit, std::string* error
 }  // namespace
 
 bool ProtocolCodec::EncodeRequest(const Request& request, std::string* frame, std::string* error) {
-  if (frame == nullptr || request.version != kCurrentVersion || !CheckString(request.topic, 65535, error) ||
-      !CheckString(request.payload, kMaxPayloadBytes, error)) return false;
+  if (frame == nullptr || request.version != kCurrentVersion ||
+      !CheckString(request.topic, 65535, error) ||
+      !CheckString(request.payload, kMaxPayloadBytes, error))
+    return false;
   frame->clear();
-  Put16(frame, kMagic); frame->push_back(static_cast<char>(request.version));
-  frame->push_back(static_cast<char>(request.command)); Put64(frame, request.request_id);
-  Put16(frame, request.flags); Put16(frame, static_cast<std::uint16_t>(request.topic.size()));
-  frame->append(request.topic); Put32(frame, static_cast<std::uint32_t>(request.payload.size()));
-  frame->append(request.payload); return true;
+  Put16(frame, kMagic);
+  frame->push_back(static_cast<char>(request.version));
+  frame->push_back(static_cast<char>(request.command));
+  Put64(frame, request.request_id);
+  Put16(frame, request.flags);
+  Put16(frame, static_cast<std::uint16_t>(request.topic.size()));
+  frame->append(request.topic);
+  Put32(frame, static_cast<std::uint32_t>(request.payload.size()));
+  frame->append(request.payload);
+  return true;
 }
 
-bool ProtocolCodec::EncodeResponse(const Response& response, std::string* frame, std::string* error) {
-  if (frame == nullptr || response.version != kCurrentVersion || !CheckString(response.payload, kMaxPayloadBytes, error)) return false;
-  frame->clear(); Put16(frame, kMagic); frame->push_back(static_cast<char>(response.version));
-  frame->push_back(static_cast<char>(response.status)); Put64(frame, response.request_id);
-  Put16(frame, response.flags); Put32(frame, static_cast<std::uint32_t>(response.payload.size()));
-  frame->append(response.payload); return true;
+bool ProtocolCodec::EncodeResponse(const Response& response, std::string* frame,
+                                   std::string* error) {
+  if (frame == nullptr || response.version != kCurrentVersion ||
+      !CheckString(response.payload, kMaxPayloadBytes, error))
+    return false;
+  frame->clear();
+  Put16(frame, kMagic);
+  frame->push_back(static_cast<char>(response.version));
+  frame->push_back(static_cast<char>(response.status));
+  Put64(frame, response.request_id);
+  Put16(frame, response.flags);
+  Put32(frame, static_cast<std::uint32_t>(response.payload.size()));
+  frame->append(response.payload);
+  return true;
 }
 
 bool ProtocolCodec::DecodeRequest(std::string_view frame, Request* request, std::string* error) {
@@ -85,9 +102,12 @@ bool ProtocolCodec::DecodeRequest(std::string_view frame, Request* request, std:
     return false;
   }
   if (!ValidCommon(frame, payload_offset, payload_offset, static_cast<std::uint8_t>(frame[2]),
-                   Get32(frame, payload_length_offset), error)) return false;
-  request->version = static_cast<std::uint8_t>(frame[2]); request->command = static_cast<Command>(frame[3]);
-  request->request_id = Get64(frame, 4); request->flags = Get16(frame, 12);
+                   Get32(frame, payload_length_offset), error))
+    return false;
+  request->version = static_cast<std::uint8_t>(frame[2]);
+  request->command = static_cast<Command>(frame[3]);
+  request->request_id = Get64(frame, 4);
+  request->flags = Get16(frame, 12);
   request->topic.assign(frame.substr(16, topic_len));
   request->payload.assign(frame.substr(payload_offset));
   return true;
@@ -96,14 +116,19 @@ bool ProtocolCodec::DecodeRequest(std::string_view frame, Request* request, std:
 bool ProtocolCodec::DecodeResponse(std::string_view frame, Response* response, std::string* error) {
   if (response == nullptr || frame.size() < 18) return false;
   const auto payload_len = Get32(frame, 14);
-  if (!ValidCommon(frame, 18, 18, static_cast<std::uint8_t>(frame[2]), payload_len, error)) return false;
-  response->version = static_cast<std::uint8_t>(frame[2]); response->status = static_cast<Status>(frame[3]);
-  response->request_id = Get64(frame, 4); response->flags = Get16(frame, 12);
-  response->payload.assign(frame.substr(18)); return true;
+  if (!ValidCommon(frame, 18, 18, static_cast<std::uint8_t>(frame[2]), payload_len, error))
+    return false;
+  response->version = static_cast<std::uint8_t>(frame[2]);
+  response->status = static_cast<Status>(frame[3]);
+  response->request_id = Get64(frame, 4);
+  response->flags = Get16(frame, 12);
+  response->payload.assign(frame.substr(18));
+  return true;
 }
 
 bool RequestStreamDecoder::Push(std::string_view bytes, std::vector<Request>* requests,
                                 std::string* error) {
+  // 只在收到完整帧后才移除缓冲前缀，因此半包可以安全地等待下一次网络读取。
   if (requests == nullptr || bytes.size() > kMaxPayloadBytes + 65555 ||
       buffer_.size() > kMaxPayloadBytes + 65555 - bytes.size()) {
     if (error != nullptr) *error = "request stream buffer exceeds limit";

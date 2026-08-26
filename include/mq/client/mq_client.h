@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <memory>
@@ -11,10 +11,20 @@
 
 namespace mq::client {
 
+// ack 模式决定生产请求在何时向调用方确认：不等待、Leader 落盘或达到复制 quorum。
 enum class AckMode { kZero, kOne, kAll };
-struct ProduceResult { std::uint32_t partition = 0; std::uint64_t offset = 0; };
-struct ProducerMessage { std::string key; std::string value; };
-struct TopicInfo { std::string name; std::uint32_t partitions = 0; };
+struct ProduceResult {
+  std::uint32_t partition = 0;
+  std::uint64_t offset = 0;
+};
+struct ProducerMessage {
+  std::string key;
+  std::string value;
+};
+struct TopicInfo {
+  std::string name;
+  std::uint32_t partitions = 0;
+};
 
 class MqProducer {
  public:
@@ -24,6 +34,7 @@ class MqProducer {
   bool connect(const std::string& host, std::uint16_t port);
   bool connect(const std::vector<std::pair<std::string, std::uint16_t>>& endpoints);
   bool createTopic(const std::string& name, std::uint32_t partitions = 1);
+  // SDK 隐藏协议帧和重连细节，失败原因通过 lastError 获取。
   bool produce(const std::string& topic, const std::string& key, const std::string& value);
   bool produce(const std::string& topic, const std::string& key, const std::string& value,
                AckMode ack, ProduceResult* result = nullptr);
@@ -39,6 +50,7 @@ class MqProducer {
 
  public:
   struct Impl;
+
  private:
   std::unique_ptr<Impl> impl_;
 };
@@ -60,6 +72,7 @@ class MqConsumer {
 
  public:
   struct Impl;
+
  private:
   std::unique_ptr<Impl> impl_;
 };

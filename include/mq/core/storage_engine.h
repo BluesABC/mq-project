@@ -1,7 +1,7 @@
-#pragma once
+﻿#pragma once
 
-#include <cstdint>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -11,6 +11,7 @@
 
 namespace mq::core {
 
+// fsync 策略在可靠性和吞吐之间取舍；配置为每批或按时间间隔时需要显式 Flush。
 enum class FsyncPolicy { kPerMessage, kPerBatch, kInterval };
 
 struct StorageConfig {
@@ -24,6 +25,7 @@ struct StorageConfig {
 };
 
 struct Message {
+  // offset 只在同一 Topic 分区内有序，不能跨分区比较或提交。
   std::uint64_t offset = 0;
   std::int64_t timestamp_ms = 0;
   std::string key;
@@ -38,11 +40,14 @@ class StorageEngine {
   StorageEngine(const StorageEngine&) = delete;
   StorageEngine& operator=(const StorageEngine&) = delete;
 
+  // Open 负责建立目录并启动清理线程；后续写入统一从本接口进入 WAL。
   bool Open(std::string* error = nullptr);
-  bool Append(const std::string& topic, std::uint32_t partition, std::string key,
-              std::string value, Message* message, std::string* error = nullptr);
-  bool AppendReplica(const std::string& topic, std::uint32_t partition,
-                     const Message& message, std::string* error = nullptr);
+  bool Append(const std::string& topic, std::uint32_t partition, std::string key, std::string value,
+              Message* message, std::string* error = nullptr);
+  // 副本追加要求 offset 连续，借此发现复制缺口而不是静默覆盖数据。
+  bool AppendReplica(const std::string& topic, std::uint32_t partition, const Message& message,
+                     std::string* error = nullptr);
+  // Read 以 max_bytes 限制单次返回量，防止消费者请求导致无界内存增长。
   bool Read(const std::string& topic, std::uint32_t partition, std::uint64_t start_offset,
             std::uint32_t max_bytes, std::vector<Message>* messages,
             std::string* error = nullptr) const;

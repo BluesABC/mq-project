@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <filesystem>
@@ -8,6 +8,7 @@
 
 namespace mq::core {
 
+// 消费位点以 group/topic/partition 为键持久化，重启后可恢复消费进度。
 struct ConsumerOffset {
   std::string group;
   std::string topic;

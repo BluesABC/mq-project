@@ -38,10 +38,11 @@ void ConnectionKeepsBuffersOnOwnerLoop() {
   assert(loop.QueueInLoop([&] {
     pool = std::make_shared<mq::core::MemoryPool>(256);
     connection = std::make_shared<mq::network::TcpConnection>(1, &loop, pool.get(), 64, 64);
-    connection->SetReadCallback([&](std::shared_ptr<mq::network::TcpConnection>, std::string_view bytes) {
-      received.assign(bytes);
-      return bytes.size();
-    });
+    connection->SetReadCallback(
+        [&](std::shared_ptr<mq::network::TcpConnection>, std::string_view bytes) {
+          received.assign(bytes);
+          return bytes.size();
+        });
     assert(connection->OnReadable("request"));
     setup_done->set_value();
   }));

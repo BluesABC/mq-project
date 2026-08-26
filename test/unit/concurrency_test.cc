@@ -22,7 +22,8 @@ void BoundedQueueBehavior() {
   assert(!queue.TryEnqueue(std::make_unique<int>(5)));
   assert(queue.TryDequeue(&value) && *value == 1);
   assert(queue.TryEnqueue(std::make_unique<int>(5)));
-  while (queue.TryDequeue(&value)) {}
+  while (queue.TryDequeue(&value)) {
+  }
   assert(!queue.TryDequeue(&value));
 }
 

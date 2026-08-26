@@ -1,13 +1,13 @@
-#include "mq/server/broker.h"
+﻿#include "mq/server/broker.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <algorithm>
+#include <limits>
+#include <sstream>
 #include <string_view>
 #include <utility>
 #include <vector>
-#include <sstream>
-#include <limits>
 
 #include "mq/core/logger.h"
 #include "mq/server/replication.h"
@@ -30,7 +30,8 @@ void Put64(std::string* out, std::uint64_t value) {
 }
 
 bool Take(std::string_view input, std::size_t* position, std::size_t count) {
-  if (position == nullptr || *position > input.size() || count > input.size() - *position) return false;
+  if (position == nullptr || *position > input.size() || count > input.size() - *position)
+    return false;
   *position += count;
   return true;
 }
@@ -56,26 +57,35 @@ std::uint64_t Get64(std::string_view input, std::size_t position) {
   return value;
 }
 std::string IdempotencyKey(std::uint64_t producer_id, std::uint64_t sequence) {
+  // Producer 重试时复用同一序号，Broker 用该键避免重复写入 WAL。
   return std::to_string(producer_id) + ":" + std::to_string(sequence);
 }
 
 }  // namespace
 
-Broker::Broker(std::filesystem::path data_dir) : Broker(std::move(data_dir), core::StorageConfig{}) {}
+Broker::Broker(std::filesystem::path data_dir)
+    : Broker(std::move(data_dir), core::StorageConfig{}) {}
 Broker::Broker(std::filesystem::path data_dir, core::StorageConfig storage_config)
-    : storage_(data_dir, storage_config), metadata_store_(data_dir / "metadata" / "topics.meta"),
-      offset_store_(data_dir / "metadata" / "consumer_offsets.meta"), storage_config_(storage_config),
+    : storage_(data_dir, storage_config),
+      metadata_store_(data_dir / "metadata" / "topics.meta"),
+      offset_store_(data_dir / "metadata" / "consumer_offsets.meta"),
+      storage_config_(storage_config),
       replication_coordinator_(std::make_unique<ReplicationCoordinator>(node_id_)) {}
 
-Broker::~Broker() { StopReplication(); }
+Broker::~Broker() {
+  StopReplication();
+}
 
-void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers, std::size_t quorum, bool follower) {
+void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers,
+                                  std::size_t quorum, bool follower) {
   node_id_ = std::move(node_id);
   replication_peers_ = std::move(peers);
   replication_quorum_ = quorum == 0 ? replication_peers_.size() + 1 : quorum;
   follower_ = follower;
-  replication_coordinator_ = std::make_unique<ReplicationCoordinator>(node_id_, follower ? ReplicaRole::kFollower : ReplicaRole::kLeader);
-  for (const auto& peer : replication_peers_) replication_coordinator_->RegisterReplica(peer.node_id);
+  replication_coordinator_ = std::make_unique<ReplicationCoordinator>(
+      node_id_, follower ? ReplicaRole::kFollower : ReplicaRole::kLeader);
+  for (const auto& peer : replication_peers_)
+    replication_coordinator_->RegisterReplica(peer.node_id);
 }
 
 void Broker::ConfigureRateLimit(std::uint64_t produce_requests_per_second) {
@@ -135,6 +145,7 @@ void Broker::ReplicationLoop() {
   try {
     auto last_election = std::chrono::steady_clock::now() - std::chrono::seconds(2);
     while (!stop_replication_.load(std::memory_order_acquire)) {
+      // 复制线程只负责与 Peer 同步，不占用处理客户端请求的 Reactor 线程。
       if (replication_coordinator_->role() != ReplicaRole::kLeader) {
         bool leader_seen = false;
         for (const auto& peer : replication_peers_) {
@@ -143,27 +154,37 @@ void Broker::ReplicationLoop() {
             if (client.Heartbeat(node_id_, 0)) leader_seen = true;
             for (const auto& topic : queues_.ListTopics()) {
               for (std::uint32_t partition = 0; partition < topic.partition_count; ++partition) {
-              const auto key = topic.name + ":" + std::to_string(partition);
-              std::uint64_t offset = 0;
-              { std::lock_guard lock(replication_mutex_); offset = replication_offsets_[key]; }
-              std::vector<core::Message> messages;
-              if (!client.Fetch(topic.name, partition, offset, 1024 * 1024, &messages)) continue;
-              leader_seen = true;
-              bool applied = true;
-              for (const auto& message : messages) {
-                std::string error;
-                if (!storage_.AppendReplica(topic.name, partition, message, &error)) { applied = false; break; }
-              }
-              if (applied && !messages.empty()) {
-                offset = messages.back().offset + 1;
-                { std::lock_guard lock(replication_mutex_); replication_offsets_[key] = offset; }
-                client.Heartbeat(node_id_, offset);
-              }
+                const auto key = topic.name + ":" + std::to_string(partition);
+                std::uint64_t offset = 0;
+                {
+                  std::lock_guard lock(replication_mutex_);
+                  offset = replication_offsets_[key];
+                }
+                std::vector<core::Message> messages;
+                if (!client.Fetch(topic.name, partition, offset, 1024 * 1024, &messages)) continue;
+                leader_seen = true;
+                bool applied = true;
+                for (const auto& message : messages) {
+                  std::string error;
+                  if (!storage_.AppendReplica(topic.name, partition, message, &error)) {
+                    applied = false;
+                    break;
+                  }
+                }
+                if (applied && !messages.empty()) {
+                  offset = messages.back().offset + 1;
+                  {
+                    std::lock_guard lock(replication_mutex_);
+                    replication_offsets_[key] = offset;
+                  }
+                  client.Heartbeat(node_id_, offset);
+                }
               }
             }
           }
         }
-        if (!leader_seen && std::chrono::steady_clock::now() - last_election >= std::chrono::seconds(1)) {
+        if (!leader_seen &&
+            std::chrono::steady_clock::now() - last_election >= std::chrono::seconds(1)) {
           const auto election = replication_coordinator_->BeginElection();
           std::size_t votes = 1;
           for (const auto& peer : replication_peers_) {
@@ -175,13 +196,16 @@ void Broker::ReplicationLoop() {
               replication_coordinator_->ObserveVote(election.term, peer.node_id, true);
             }
           }
-          if (votes >= (replication_peers_.size() + 2) / 2 + 1) replication_coordinator_->ObserveVote(election.term, node_id_, true);
+          if (votes >= (replication_peers_.size() + 2) / 2 + 1)
+            replication_coordinator_->ObserveVote(election.term, node_id_, true);
           last_election = std::chrono::steady_clock::now();
         }
       } else {
         for (const auto& peer : replication_peers_) {
           ReplicationClient client(peer.host, peer.port);
-          if (client.Heartbeat(node_id_, 0, replication_coordinator_->term(), replication_coordinator_->commitIndex())) replication_coordinator_->ObserveHeartbeat(peer.node_id, 0);
+          if (client.Heartbeat(node_id_, 0, replication_coordinator_->term(),
+                               replication_coordinator_->commitIndex()))
+            replication_coordinator_->ObserveHeartbeat(peer.node_id, 0);
         }
       }
       std::unique_lock lock(replication_mutex_);
@@ -201,7 +225,8 @@ bool Broker::Open(std::string* error) {
     return false;
   }
   std::vector<core::TopicMetadata> topics;
-  if (!metadata_store_.Load(&topics, error) || !queues_.ReplaceTopics(std::move(topics), error)) return false;
+  if (!metadata_store_.Load(&topics, error) || !queues_.ReplaceTopics(std::move(topics), error))
+    return false;
   if (!offset_store_.Load(&consumer_offsets_, error)) return false;
   opened_ = true;
   core::Logger::Instance().Log(core::LogLevel::kInfo, "broker storage initialized");
@@ -215,41 +240,57 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
     core::Logger::Instance().Log(core::LogLevel::kError, "broker request received before open");
     return MakeResponse(request, protocol::Status::kInternalError);
   }
-  if (request.command == protocol::Command::kProduce || request.command == protocol::Command::kProduceBatch) {
+  if (request.command == protocol::Command::kProduce ||
+      request.command == protocol::Command::kProduceBatch) {
     produce_count_.fetch_add(1, std::memory_order_relaxed);
   } else if (request.command == protocol::Command::kFetch) {
     fetch_count_.fetch_add(1, std::memory_order_relaxed);
   }
+  // 所有命令在此分派，统一经过版本、角色、限流和错误码处理路径。
   protocol::Response response;
   switch (request.command) {
     case protocol::Command::kCreateTopic:
-      response = HandleCreateTopic(request); break;
+      response = HandleCreateTopic(request);
+      break;
     case protocol::Command::kListTopic:
-      response = HandleListTopic(request); break;
+      response = HandleListTopic(request);
+      break;
     case protocol::Command::kMetrics:
-      response = HandleMetrics(request); break;
+      response = HandleMetrics(request);
+      break;
     case protocol::Command::kDeleteTopic:
-      response = HandleDeleteTopic(request); break;
+      response = HandleDeleteTopic(request);
+      break;
     case protocol::Command::kProduce:
-      response = HandleProduce(request); break;
+      response = HandleProduce(request);
+      break;
     case protocol::Command::kProduceBatch:
-      response = HandleProduceBatch(request); break;
+      response = HandleProduceBatch(request);
+      break;
     case protocol::Command::kFetch:
-      response = HandleFetch(request); break;
+      response = HandleFetch(request);
+      break;
     case protocol::Command::kCommitOffset:
-      response = HandleCommitOffset(request); break;
+      response = HandleCommitOffset(request);
+      break;
     case protocol::Command::kHeartbeat:
-      response = HandleHeartbeat(request); break;
+      response = HandleHeartbeat(request);
+      break;
     case protocol::Command::kReplicaFetch:
-      response = HandleReplicaFetch(request); break;
+      response = HandleReplicaFetch(request);
+      break;
     case protocol::Command::kReplicaAppend:
-      response = HandleReplicaAppend(request); break;
+      response = HandleReplicaAppend(request);
+      break;
     case protocol::Command::kReplicaVote:
-      response = HandleReplicaVote(request); break;
+      response = HandleReplicaVote(request);
+      break;
     default:
-      response = MakeResponse(request, protocol::Status::kBadRequest); break;
+      response = MakeResponse(request, protocol::Status::kBadRequest);
+      break;
   }
-  if (response.status != protocol::Status::kOk) error_count_.fetch_add(1, std::memory_order_relaxed);
+  if (response.status != protocol::Status::kOk)
+    error_count_.fetch_add(1, std::memory_order_relaxed);
   return response;
 }
 
@@ -259,9 +300,12 @@ bool Broker::Flush(std::string* error) {
 
 protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) != 0) {
-    if (request.topic.empty() || request.payload.size() < 10) return MakeResponse(request, protocol::Status::kBadRequest);
+    if (request.topic.empty() || request.payload.size() < 10)
+      return MakeResponse(request, protocol::Status::kBadRequest);
     const auto node_size = Get16(request.payload, 0);
-    if (node_size == 0 || (2ULL + node_size + 8 != request.payload.size() && 2ULL + node_size + 24 != request.payload.size())) return MakeResponse(request, protocol::Status::kBadRequest);
+    if (node_size == 0 || (2ULL + node_size + 8 != request.payload.size() &&
+                           2ULL + node_size + 24 != request.payload.size()))
+      return MakeResponse(request, protocol::Status::kBadRequest);
     const std::string node_id = request.payload.substr(2, node_size);
     const auto replicated_offset = Get64(request.payload, 2 + node_size);
     std::string response_payload;
@@ -269,7 +313,8 @@ protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
     if (request.payload.size() == 2ULL + node_size + 24) {
       const auto term = Get64(request.payload, 10 + node_size);
       const auto commit = Get64(request.payload, 18 + node_size);
-      if (!replication_coordinator_->ObserveAppend(term, node_id, replicated_offset, commit)) return MakeResponse(request, protocol::Status::kStorageError);
+      if (!replication_coordinator_->ObserveAppend(term, node_id, replicated_offset, commit))
+        return MakeResponse(request, protocol::Status::kStorageError);
     } else {
       replication_coordinator_->ObserveHeartbeat(node_id, replicated_offset);
     }
@@ -291,7 +336,8 @@ protocol::Response Broker::HandleReplicaFetch(const protocol::Request& request) 
   std::vector<core::Message> messages;
   std::string error;
   if (!storage_.Read(request.topic, partition, offset, max_bytes, &messages, &error))
-    return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic : protocol::Status::kStorageError);
+    return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
+                                                          : protocol::Status::kStorageError);
   std::string payload;
   Put32(&payload, static_cast<std::uint32_t>(messages.size()));
   for (const auto& message : messages) {
@@ -314,29 +360,45 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
     const auto term = Get64(request.payload, 0);
     const auto commit = Get64(request.payload, 8);
     const auto leader_size = Get16(request.payload, 16);
-    if (leader_size == 0 || request.payload.size() < 18ULL + leader_size + 8) return MakeResponse(request, protocol::Status::kBadRequest);
-    if (!replication_coordinator_->ObserveAppend(term, request.payload.substr(18, leader_size), 0, commit)) return MakeResponse(request, protocol::Status::kStorageError);
+    if (leader_size == 0 || request.payload.size() < 18ULL + leader_size + 8)
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    if (!replication_coordinator_->ObserveAppend(term, request.payload.substr(18, leader_size), 0,
+                                                 commit))
+      return MakeResponse(request, protocol::Status::kStorageError);
     position = 18 + leader_size;
   }
-  const auto partition = Get32(request.payload, position); position += 4;
-  const auto count = Get32(request.payload, position); position += 4;
+  const auto partition = Get32(request.payload, position);
+  position += 4;
+  const auto count = Get32(request.payload, position);
+  position += 4;
   if (count == 0 || count > 10000) return MakeResponse(request, protocol::Status::kBadRequest);
   std::string error;
   for (std::uint32_t index = 0; index < count; ++index) {
-    if (position + 18 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    if (position + 18 > request.payload.size())
+      return MakeResponse(request, protocol::Status::kBadRequest);
     core::Message message;
-    message.offset = Get64(request.payload, position); position += 8;
-    message.timestamp_ms = static_cast<std::int64_t>(Get64(request.payload, position)); position += 8;
-    const auto key_size = Get16(request.payload, position); position += 2;
-    if (position + key_size + 4 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
-    message.key.assign(request.payload, position, key_size); position += key_size;
-    const auto value_size = Get32(request.payload, position); position += 4;
-    if (position + value_size > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
-    message.value.assign(request.payload, position, value_size); position += value_size;
+    message.offset = Get64(request.payload, position);
+    position += 8;
+    message.timestamp_ms = static_cast<std::int64_t>(Get64(request.payload, position));
+    position += 8;
+    const auto key_size = Get16(request.payload, position);
+    position += 2;
+    if (position + key_size + 4 > request.payload.size())
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    message.key.assign(request.payload, position, key_size);
+    position += key_size;
+    const auto value_size = Get32(request.payload, position);
+    position += 4;
+    if (position + value_size > request.payload.size())
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    message.value.assign(request.payload, position, value_size);
+    position += value_size;
     if (!storage_.AppendReplica(request.topic, partition, message, &error))
-      return MakeResponse(request, error == "replica offset gap" ? protocol::Status::kInvalidOffset : protocol::Status::kStorageError);
+      return MakeResponse(request, error == "replica offset gap" ? protocol::Status::kInvalidOffset
+                                                                 : protocol::Status::kStorageError);
   }
-  if (position != request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  if (position != request.payload.size())
+    return MakeResponse(request, protocol::Status::kBadRequest);
   return MakeResponse(request, protocol::Status::kOk);
 }
 
@@ -347,28 +409,44 @@ protocol::Response Broker::HandleReplicaVote(const protocol::Request& request) {
   const auto size = Get16(request.payload, 8);
   if (size == 0 || request.payload.size() != 10ULL + size)
     return MakeResponse(request, protocol::Status::kBadRequest);
-  const bool granted = replication_coordinator_->RequestVote(term, request.payload.substr(10, size));
+  const bool granted =
+      replication_coordinator_->RequestVote(term, request.payload.substr(10, size));
   std::string payload(1, granted ? '\1' : '\0');
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
 protocol::Response Broker::HandleCommitOffset(const protocol::Request& request) {
-  std::string_view payload = request.payload; std::size_t position = 0;
+  std::string_view payload = request.payload;
+  std::size_t position = 0;
   if (!Take(payload, &position, 2)) return MakeResponse(request, protocol::Status::kBadRequest);
-  const auto group_size = Get16(payload, 0); const std::size_t group_position = position;
-  if (!Take(payload, &position, group_size) || !Take(payload, &position, 4) || !Take(payload, &position, 8) || position != payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
-  const auto partition = Get32(payload, group_position + group_size); const auto offset = Get64(payload, group_position + group_size + 4);
-  if (group_size == 0 || request.topic.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
-  std::uint32_t resolved_partition = 0; std::string route_error;
+  const auto group_size = Get16(payload, 0);
+  const std::size_t group_position = position;
+  if (!Take(payload, &position, group_size) || !Take(payload, &position, 4) ||
+      !Take(payload, &position, 8) || position != payload.size())
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto partition = Get32(payload, group_position + group_size);
+  const auto offset = Get64(payload, group_position + group_size + 4);
+  if (group_size == 0 || request.topic.empty())
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  std::uint32_t resolved_partition = 0;
+  std::string route_error;
   if (!queues_.ResolvePartition(request.topic, partition, "", &resolved_partition, &route_error)) {
-    return MakeResponse(request, route_error == "unknown topic" ? protocol::Status::kUnknownTopic : protocol::Status::kInvalidOffset);
+    return MakeResponse(request, route_error == "unknown topic" ? protocol::Status::kUnknownTopic
+                                                                : protocol::Status::kInvalidOffset);
   }
   std::lock_guard<std::mutex> lock(topic_metadata_mutex_);
   const std::string group(payload.substr(group_position, group_size));
-  auto it = std::find_if(consumer_offsets_.begin(), consumer_offsets_.end(), [&](const core::ConsumerOffset& item) { return item.group == group && item.topic == request.topic && item.partition == partition; });
-  if (it == consumer_offsets_.end()) consumer_offsets_.push_back({group, request.topic, partition, offset}); else it->offset = offset;
+  auto it = std::find_if(
+      consumer_offsets_.begin(), consumer_offsets_.end(), [&](const core::ConsumerOffset& item) {
+        return item.group == group && item.topic == request.topic && item.partition == partition;
+      });
+  if (it == consumer_offsets_.end())
+    consumer_offsets_.push_back({group, request.topic, partition, offset});
+  else
+    it->offset = offset;
   std::string error;
-  if (!offset_store_.Save(consumer_offsets_, &error)) return MakeResponse(request, protocol::Status::kStorageError);
+  if (!offset_store_.Save(consumer_offsets_, &error))
+    return MakeResponse(request, protocol::Status::kStorageError);
   return MakeResponse(request, protocol::Status::kOk);
 }
 
@@ -384,7 +462,7 @@ protocol::Response Broker::HandleCreateTopic(const protocol::Request& request) {
     return MakeResponse(request, protocol::Status::kOk);
   }
   return MakeResponse(request, error == "topic already exists" ? protocol::Status::kTopicExists
-                                                                : protocol::Status::kBadRequest);
+                                                               : protocol::Status::kBadRequest);
 }
 
 protocol::Response Broker::HandleDeleteTopic(const protocol::Request& request) {
@@ -395,7 +473,8 @@ protocol::Response Broker::HandleDeleteTopic(const protocol::Request& request) {
   if (!queues_.GetTopic(request.topic, &deleted_topic)) {
     return MakeResponse(request, protocol::Status::kUnknownTopic);
   }
-  if (!queues_.DeleteTopic(request.topic, &error)) return MakeResponse(request, protocol::Status::kUnknownTopic);
+  if (!queues_.DeleteTopic(request.topic, &error))
+    return MakeResponse(request, protocol::Status::kUnknownTopic);
   if (!metadata_store_.Save(queues_.ListTopics(), &error)) {
     queues_.CreateTopic(std::move(deleted_topic.name), deleted_topic.partition_count, nullptr);
     return MakeResponse(request, protocol::Status::kStorageError);
@@ -419,14 +498,21 @@ protocol::Response Broker::HandleListTopic(const protocol::Request& request) {
 }
 
 protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
-  if (!request.topic.empty() || !request.payload.empty() || (request.flags & protocol::kFlagReplication) != 0)
+  if (!request.topic.empty() || !request.payload.empty() ||
+      (request.flags & protocol::kFlagReplication) != 0)
     return MakeResponse(request, protocol::Status::kBadRequest);
   std::string role = "unknown";
   if (replication_coordinator_) {
     switch (replication_coordinator_->role()) {
-      case ReplicaRole::kLeader: role = "leader"; break;
-      case ReplicaRole::kFollower: role = "follower"; break;
-      case ReplicaRole::kCandidate: role = "candidate"; break;
+      case ReplicaRole::kLeader:
+        role = "leader";
+        break;
+      case ReplicaRole::kFollower:
+        role = "follower";
+        break;
+      case ReplicaRole::kCandidate:
+        role = "candidate";
+        break;
     }
   }
   std::uint64_t topic_quota = 0;
@@ -446,9 +532,11 @@ protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
           << "# TYPE mq_errors_total counter\n"
           << "mq_errors_total " << error_count_.load(std::memory_order_relaxed) << "\n"
           << "# TYPE mq_replication_term gauge\n"
-          << "mq_replication_term " << (replication_coordinator_ ? replication_coordinator_->term() : 0) << "\n"
+          << "mq_replication_term "
+          << (replication_coordinator_ ? replication_coordinator_->term() : 0) << "\n"
           << "# TYPE mq_commit_index gauge\n"
-          << "mq_commit_index " << (replication_coordinator_ ? replication_coordinator_->commitIndex() : 0) << "\n"
+          << "mq_commit_index "
+          << (replication_coordinator_ ? replication_coordinator_->commitIndex() : 0) << "\n"
           << "# TYPE mq_topic_produce_quota_bytes_per_second gauge\n"
           << "mq_topic_produce_quota_bytes_per_second " << topic_quota << "\n"
           << "# TYPE mq_topic_produce_bytes_used gauge\n"
@@ -463,7 +551,8 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
       replication_coordinator_->role() != ReplicaRole::kLeader) {
     return MakeResponse(request, protocol::Status::kNotLeader);
   }
-  if (enforce_rate_limit && (request.flags & protocol::kFlagReplication) == 0 && !AllowProduceRequest())
+  if (enforce_rate_limit && (request.flags & protocol::kFlagReplication) == 0 &&
+      !AllowProduceRequest())
     return MakeResponse(request, protocol::Status::kRateLimited);
   std::string_view payload = request.payload;
   std::size_t position = 0;
@@ -471,7 +560,8 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
   const bool has_metadata = (request.flags & protocol::kFlagProducerMetadata) != 0;
   if (has_metadata) {
     if (!Take(payload, &position, 16)) return MakeResponse(request, protocol::Status::kBadRequest);
-    producer_id = Get64(payload, 0); sequence = Get64(payload, 8);
+    producer_id = Get64(payload, 0);
+    sequence = Get64(payload, 8);
     std::lock_guard<std::mutex> lock(idempotency_mutex_);
     const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, sequence));
     if (it != idempotency_cache_.end()) return it->second;
@@ -495,33 +585,41 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
   const std::string key(payload.substr(key_position, key_length));
   if (!queues_.ResolvePartition(request.topic, requested_partition, key, &partition, &error)) {
     return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
-                                                           : protocol::Status::kBadRequest);
+                                                          : protocol::Status::kBadRequest);
   }
   if (enforce_topic_quota && (request.flags & protocol::kFlagReplication) == 0 &&
       !AllowTopicBytes(request.topic, static_cast<std::uint64_t>(key_length) + value_length))
     return MakeResponse(request, protocol::Status::kQuotaExceeded);
   core::Message message;
-  if (!storage_.Append(request.topic, partition, key, std::string(payload.substr(value_position, value_length)),
-                       &message, &error)) {
+  if (!storage_.Append(request.topic, partition, key,
+                       std::string(payload.substr(value_position, value_length)), &message,
+                       &error)) {
     return MakeResponse(request, protocol::Status::kStorageError);
   }
   replication_coordinator_->RecordLocalOffset(message.offset);
-  if ((request.flags & protocol::kAckMask) == protocol::kAckAll && !Replicate(request.topic, partition, message))
+  if ((request.flags & protocol::kAckMask) == protocol::kAckAll &&
+      !Replicate(request.topic, partition, message))
     return MakeResponse(request, protocol::Status::kStorageError);
   std::string response_payload;
   Put32(&response_payload, partition);
   Put64(&response_payload, message.offset);
   auto response = MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
-  if (has_metadata) { std::lock_guard<std::mutex> lock(idempotency_mutex_); idempotency_cache_[IdempotencyKey(producer_id, sequence)] = response; }
+  if (has_metadata) {
+    std::lock_guard<std::mutex> lock(idempotency_mutex_);
+    idempotency_cache_[IdempotencyKey(producer_id, sequence)] = response;
+  }
   return response;
 }
 
-bool Broker::Replicate(const std::string& topic, std::uint32_t partition, const core::Message& message) {
+bool Broker::Replicate(const std::string& topic, std::uint32_t partition,
+                       const core::Message& message) {
   if (replication_peers_.empty() || replication_quorum_ <= 1) return false;
   std::size_t acknowledgements = 1;
   for (const auto& peer : replication_peers_) {
     ReplicationClient client(peer.host, peer.port);
-    if (client.Append(topic, partition, std::vector<core::Message>{message}, replication_coordinator_->term(), replication_coordinator_->commitIndex(), node_id_)) {
+    if (client.Append(topic, partition, std::vector<core::Message>{message},
+                      replication_coordinator_->term(), replication_coordinator_->commitIndex(),
+                      node_id_)) {
       ++acknowledgements;
       replication_coordinator_->ObserveHeartbeat(peer.node_id, message.offset);
     }
@@ -536,27 +634,57 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
     return MakeResponse(request, protocol::Status::kNotLeader);
   if ((request.flags & protocol::kFlagReplication) == 0 && !AllowProduceRequest())
     return MakeResponse(request, protocol::Status::kRateLimited);
-  if (!(request.flags & protocol::kFlagProducerMetadata)) return MakeResponse(request, protocol::Status::kNotSupported);
-  std::string_view payload = request.payload; std::size_t position = 0;
+  if (!(request.flags & protocol::kFlagProducerMetadata))
+    return MakeResponse(request, protocol::Status::kNotSupported);
+  std::string_view payload = request.payload;
+  std::size_t position = 0;
   if (!Take(payload, &position, 20)) return MakeResponse(request, protocol::Status::kBadRequest);
-  const auto producer_id = Get64(payload, 0); const auto first_sequence = Get64(payload, 8); const auto count = Get32(payload, 16);
+  const auto producer_id = Get64(payload, 0);
+  const auto first_sequence = Get64(payload, 8);
+  const auto count = Get32(payload, 16);
   if (count == 0 || count > 10000) return MakeResponse(request, protocol::Status::kBadRequest);
-  std::vector<protocol::Response> results(count); std::vector<bool> is_cached(count, false);
+  std::vector<protocol::Response> results(count);
+  std::vector<bool> is_cached(count, false);
   {
     std::lock_guard<std::mutex> lock(idempotency_mutex_);
-    for (std::uint32_t i = 0; i < count; ++i) { const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, first_sequence + i)); if (it != idempotency_cache_.end()) { results[i] = it->second; is_cached[i] = true; } }
+    for (std::uint32_t i = 0; i < count; ++i) {
+      const auto it = idempotency_cache_.find(IdempotencyKey(producer_id, first_sequence + i));
+      if (it != idempotency_cache_.end()) {
+        results[i] = it->second;
+        is_cached[i] = true;
+      }
+    }
   }
   std::vector<protocol::Request> pending(count);
   std::uint64_t new_bytes = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
     if (!Take(payload, &position, 2)) return MakeResponse(request, protocol::Status::kBadRequest);
-    const auto key_size = Get16(payload, position - 2); const auto key_position = position;
-    if (!Take(payload, &position, key_size) || !Take(payload, &position, 4)) return MakeResponse(request, protocol::Status::kBadRequest);
-    const auto value_size = Get32(payload, position - 4); const auto value_position = position;
-    if (!Take(payload, &position, value_size)) return MakeResponse(request, protocol::Status::kBadRequest);
-    if (is_cached[i]) { if (results[i].payload.size() != 12) return MakeResponse(request, protocol::Status::kInternalError); continue; }
-    protocol::Request single = request; single.command = protocol::Command::kProduce; single.flags = (request.flags & ~protocol::kFlagProducerMetadata) | protocol::kFlagProducerMetadata;
-    std::string single_payload; Put64(&single_payload, producer_id); Put64(&single_payload, first_sequence + i); Put32(&single_payload, 0xFFFFFFFFu); Put16(&single_payload, key_size); single_payload.append(payload.substr(key_position, key_size)); Put32(&single_payload, value_size); single_payload.append(payload.substr(value_position, value_size)); single.payload = std::move(single_payload);
+    const auto key_size = Get16(payload, position - 2);
+    const auto key_position = position;
+    if (!Take(payload, &position, key_size) || !Take(payload, &position, 4))
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    const auto value_size = Get32(payload, position - 4);
+    const auto value_position = position;
+    if (!Take(payload, &position, value_size))
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    if (is_cached[i]) {
+      if (results[i].payload.size() != 12)
+        return MakeResponse(request, protocol::Status::kInternalError);
+      continue;
+    }
+    protocol::Request single = request;
+    single.command = protocol::Command::kProduce;
+    single.flags =
+        (request.flags & ~protocol::kFlagProducerMetadata) | protocol::kFlagProducerMetadata;
+    std::string single_payload;
+    Put64(&single_payload, producer_id);
+    Put64(&single_payload, first_sequence + i);
+    Put32(&single_payload, 0xFFFFFFFFu);
+    Put16(&single_payload, key_size);
+    single_payload.append(payload.substr(key_position, key_size));
+    Put32(&single_payload, value_size);
+    single_payload.append(payload.substr(value_position, value_size));
+    single.payload = std::move(single_payload);
     pending[i] = std::move(single);
     const auto message_bytes = static_cast<std::uint64_t>(key_size) + value_size;
     if (new_bytes > std::numeric_limits<std::uint64_t>::max() - message_bytes)
@@ -564,13 +692,16 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
     new_bytes += message_bytes;
   }
   if (position != payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
-  if ((request.flags & protocol::kFlagReplication) == 0 && !AllowTopicBytes(request.topic, new_bytes))
+  if ((request.flags & protocol::kFlagReplication) == 0 &&
+      !AllowTopicBytes(request.topic, new_bytes))
     return MakeResponse(request, protocol::Status::kQuotaExceeded);
-  std::string response_payload; Put32(&response_payload, count);
+  std::string response_payload;
+  Put32(&response_payload, count);
   for (std::uint32_t i = 0; i < count; ++i) {
     if (!is_cached[i]) {
       results[i] = HandleProduce(pending[i], false, false);
-      if (results[i].status != protocol::Status::kOk) return MakeResponse(request, results[i].status);
+      if (results[i].status != protocol::Status::kOk)
+        return MakeResponse(request, results[i].status);
     }
     response_payload.append(results[i].payload);
   }
@@ -587,7 +718,7 @@ protocol::Response Broker::HandleFetch(const protocol::Request& request) {
   std::string error;
   if (!queues_.ResolvePartition(request.topic, partition, "", &resolved_partition, &error)) {
     return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
-                                                           : protocol::Status::kInvalidOffset);
+                                                          : protocol::Status::kInvalidOffset);
   }
   std::vector<core::Message> messages;
   if (!storage_.Read(request.topic, resolved_partition, offset, max_bytes, &messages, &error)) {

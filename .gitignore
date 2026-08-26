@@ -18,7 +18,8 @@ data/
 
 # IDE / 系统
 .vs/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .idea/
 *.user
 .DS_Store

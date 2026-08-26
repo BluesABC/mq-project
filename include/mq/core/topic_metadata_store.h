@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <filesystem>
 #include <string>
@@ -9,6 +9,7 @@
 
 namespace mq::core {
 
+// 元数据单独落盘，Broker 重启时可先恢复 Topic，再打开对应消息分区。
 class TopicMetadataStore {
  public:
   explicit TopicMetadataStore(std::filesystem::path path) : path_(std::move(path)) {}

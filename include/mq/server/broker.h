@@ -1,24 +1,25 @@
-#pragma once
+﻿#pragma once
 
-#include <filesystem>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
-#include <vector>
-#include <unordered_map>
-#include <memory>
-#include <atomic>
-#include <condition_variable>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
-#include "mq/core/queue_manager.h"
 #include "mq/core/consumer_offset_store.h"
+#include "mq/core/queue_manager.h"
 #include "mq/core/storage_engine.h"
 #include "mq/core/topic_metadata_store.h"
 #include "mq/protocol/commands.h"
 
 namespace mq::server {
 
+// Broker 编排协议、路由、存储、位点和复制模块，是请求进入业务层的唯一入口。
 struct ReplicationPeer {
   std::string node_id;
   std::string host;
@@ -40,6 +41,7 @@ class Broker {
   void StartReplication();
   void StopReplication();
   bool Flush(std::string* error = nullptr);
+  // Handle 保持协议 request_id 原样返回，便于客户端匹配响应和处理重试。
   protocol::Response Handle(const protocol::Request& request);
 
  private:

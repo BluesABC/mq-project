@@ -36,14 +36,17 @@ bool Parse(int argc, char** argv, Options* options) {
     const std::string name = argv[index];
     if ((name == "--host" || name == "--port" || name == "--timeout-ms") && index + 1 < argc) {
       const std::string value = argv[++index];
-      if (name == "--host") options->host = value;
+      if (name == "--host")
+        options->host = value;
       else {
         std::uint64_t number = 0;
-        if (!ParseNumber(value, &number) ||
-            (name == "--port" && (number == 0 || number > 65535)) ||
-            (name == "--timeout-ms" && (number == 0 || number > UINT32_MAX))) return false;
-        if (name == "--port") options->port = static_cast<std::uint16_t>(number);
-        else options->timeout_ms = static_cast<std::uint32_t>(number);
+        if (!ParseNumber(value, &number) || (name == "--port" && (number == 0 || number > 65535)) ||
+            (name == "--timeout-ms" && (number == 0 || number > UINT32_MAX)))
+          return false;
+        if (name == "--port")
+          options->port = static_cast<std::uint16_t>(number);
+        else
+          options->timeout_ms = static_cast<std::uint32_t>(number);
       }
     } else {
       return false;

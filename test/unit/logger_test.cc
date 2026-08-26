@@ -1,9 +1,9 @@
+#include "mq/core/logger.h"
+
 #include <cassert>
 #include <filesystem>
 #include <fstream>
 #include <string>
-
-#include "mq/core/logger.h"
 
 namespace {
 

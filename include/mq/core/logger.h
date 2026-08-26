@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstddef>
 #include <filesystem>
@@ -8,6 +8,7 @@
 
 namespace mq::core {
 
+// 日志接口集中处理级别过滤和文件轮转，业务代码不应自行写日志文件。
 enum class LogLevel {
   kTrace,
   kDebug,
@@ -22,7 +23,8 @@ class Logger {
   static Logger& Instance();
 
   void SetLevel(LogLevel level);
-  bool SetFile(std::filesystem::path path, std::size_t max_file_bytes, std::string* error = nullptr);
+  bool SetFile(std::filesystem::path path, std::size_t max_file_bytes,
+               std::string* error = nullptr);
   void CloseFile();
   void Log(LogLevel level, std::string_view message);
 

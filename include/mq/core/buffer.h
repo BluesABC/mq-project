@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 #include <cstddef>
@@ -9,7 +9,8 @@
 
 namespace mq::core {
 
-// Fixed capacity avoids hot-path growth; sequence values distinguish slot state.
+// 固定容量避免热路径扩容；每个槽位的序号用于区分“可写”和“可读”状态。
+// 入队和出队位置使用显式内存序，保证生产者发布对象后消费者才能读取。
 template <typename T>
 class MpmcQueue {
  public:
@@ -21,7 +22,8 @@ class MpmcQueue {
   }
 
   ~MpmcQueue() {
-    while (DiscardOne()) {}
+    while (DiscardOne()) {
+    }
   }
 
   MpmcQueue(const MpmcQueue&) = delete;
@@ -34,12 +36,11 @@ class MpmcQueue {
     for (;;) {
       cell = &cells_[position & mask_];
       const std::size_t sequence = cell->sequence.load(std::memory_order_acquire);
-      const std::intptr_t difference = static_cast<std::intptr_t>(sequence) -
-                                       static_cast<std::intptr_t>(position);
+      const std::intptr_t difference =
+          static_cast<std::intptr_t>(sequence) - static_cast<std::intptr_t>(position);
       if (difference == 0) {
-        if (enqueue_position_.compare_exchange_weak(position, position + 1,
-                                                    std::memory_order_relaxed,
-                                                    std::memory_order_relaxed)) {
+        if (enqueue_position_.compare_exchange_weak(
+                position, position + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
           break;
         }
       } else if (difference < 0) {
@@ -53,7 +54,9 @@ class MpmcQueue {
     return true;
   }
 
-  bool TryEnqueue(T value) { return TryEmplace(std::move(value)); }
+  bool TryEnqueue(T value) {
+    return TryEmplace(std::move(value));
+  }
 
   bool TryDequeue(T* value) {
     if (value == nullptr) return false;
@@ -62,12 +65,11 @@ class MpmcQueue {
     for (;;) {
       cell = &cells_[position & mask_];
       const std::size_t sequence = cell->sequence.load(std::memory_order_acquire);
-      const std::intptr_t difference = static_cast<std::intptr_t>(sequence) -
-                                       static_cast<std::intptr_t>(position + 1);
+      const std::intptr_t difference =
+          static_cast<std::intptr_t>(sequence) - static_cast<std::intptr_t>(position + 1);
       if (difference == 0) {
-        if (dequeue_position_.compare_exchange_weak(position, position + 1,
-                                                    std::memory_order_relaxed,
-                                                    std::memory_order_relaxed)) {
+        if (dequeue_position_.compare_exchange_weak(
+                position, position + 1, std::memory_order_relaxed, std::memory_order_relaxed)) {
           break;
         }
       } else if (difference < 0) {
@@ -83,7 +85,9 @@ class MpmcQueue {
     return true;
   }
 
-  std::size_t capacity() const { return capacity_; }
+  std::size_t capacity() const {
+    return capacity_;
+  }
 
  private:
   struct Cell {

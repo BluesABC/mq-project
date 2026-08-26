@@ -22,7 +22,8 @@ std::uint64_t HashKey(const std::string& key) {
 
 }  // namespace
 
-bool QueueManager::CreateTopic(std::string name, std::uint32_t partition_count, std::string* error) {
+bool QueueManager::CreateTopic(std::string name, std::uint32_t partition_count,
+                               std::string* error) {
   if (!IsValidTopicName(name) || partition_count == 0 || partition_count > kMaxPartitions) {
     if (error != nullptr) *error = "invalid topic metadata";
     return false;
@@ -36,17 +37,25 @@ bool QueueManager::CreateTopic(std::string name, std::uint32_t partition_count, 
 
 bool QueueManager::DeleteTopic(const std::string& name, std::string* error) {
   std::unique_lock lock(mutex_);
-  if (topics_.erase(name) == 0) { if (error != nullptr) *error = "unknown topic"; return false; }
+  if (topics_.erase(name) == 0) {
+    if (error != nullptr) *error = "unknown topic";
+    return false;
+  }
   return true;
 }
 
 bool QueueManager::ReplaceTopics(std::vector<TopicMetadata> topics, std::string* error) {
   std::unordered_map<std::string, TopicMetadata> replacement;
   for (auto& topic : topics) {
-    if (!IsValidTopicName(topic.name) || topic.partition_count == 0 || topic.partition_count > kMaxPartitions ||
-        !replacement.emplace(topic.name, topic).second) { if (error != nullptr) *error = "invalid topic metadata"; return false; }
+    if (!IsValidTopicName(topic.name) || topic.partition_count == 0 ||
+        topic.partition_count > kMaxPartitions || !replacement.emplace(topic.name, topic).second) {
+      if (error != nullptr) *error = "invalid topic metadata";
+      return false;
+    }
   }
-  std::unique_lock lock(mutex_); topics_ = std::move(replacement); return true;
+  std::unique_lock lock(mutex_);
+  topics_ = std::move(replacement);
+  return true;
 }
 
 bool QueueManager::GetTopic(const std::string& name, TopicMetadata* topic) const {
@@ -63,9 +72,9 @@ std::vector<TopicMetadata> QueueManager::ListTopics() const {
   std::vector<TopicMetadata> topics;
   topics.reserve(topics_.size());
   for (const auto& item : topics_) topics.push_back(item.second);
-  std::sort(topics.begin(), topics.end(), [](const TopicMetadata& left, const TopicMetadata& right) {
-    return left.name < right.name;
-  });
+  std::sort(
+      topics.begin(), topics.end(),
+      [](const TopicMetadata& left, const TopicMetadata& right) { return left.name < right.name; });
   return topics;
 }
 

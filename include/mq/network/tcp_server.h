@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 #include <functional>
@@ -10,11 +10,13 @@
 
 namespace mq::network {
 
+// TcpServer 负责监听和连接分发，业务请求通过 RequestHandler 回调交给上层 Broker。
 class TcpServer {
  public:
   using RequestHandler = std::function<protocol::Response(const protocol::Request&)>;
   TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler);
-  TcpServer(std::string bind_address, std::uint16_t port, std::size_t worker_count, RequestHandler handler);
+  TcpServer(std::string bind_address, std::uint16_t port, std::size_t worker_count,
+            RequestHandler handler);
   ~TcpServer();
   bool Start();
   void Stop();

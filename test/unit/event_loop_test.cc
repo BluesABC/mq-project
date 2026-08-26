@@ -1,10 +1,10 @@
+#include "mq/network/event_loop.h"
+
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
 #include <future>
-
-#include "mq/network/event_loop.h"
 
 namespace {
 
