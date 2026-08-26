@@ -1,6 +1,6 @@
 # mq-project 架构设计文档
 
-> 版本: v0.1（骨架阶段） · 更新: 2026-08-19
+> 版本: v0.2（P3 安全验证阶段） · 更新: 2026-08-27
 > 各模块内部实现细节（存储引擎 WAL+mmap、网络层 epoll/io_uring、并发模型、内存管理）见 **`docs/design-details.md`**。
 
 ## 1. 设计目标与约束
@@ -34,7 +34,7 @@
                         │                     │  Segment + WAL    │     │
                         │                     └──────────────────┘     │
                         └─────────────────────────────────────────────┘
-                                      │ 复制 (后续阶段)
+                                      │ 复制（P2）
                               ┌────────▼────────┐
                               │  Follower Broker │
                               └─────────────────┘
@@ -48,7 +48,7 @@
 | 协议层 | `src/protocol` | 二进制协议定义、编解码、命令/状态码 |
 | 核心层 | `src/core` | 队列路由、存储引擎、线程池、并发原语 |
 | 服务端 | `src/server` | Broker 装配、请求分发 Handler、配置加载、主入口 |
-| 客户端 | `src/client` | SDK：同步/异步 API、连接池、重试 |
+| 客户端 | `src/client` | SDK：同步/异步 API、连接池、重试、Token 与 TLS 配置 |
 
 ## 3. 线程模型（多线程 Reactor）
 
@@ -117,7 +117,7 @@ offset 为全局递增逻辑偏移（相对 partition 首条消息，从 0 开�
 ### 4.4 过期清理
 - 基于 `log_start_offset` 推进，后台线程定期将过期/超限段标记删除，目录恢复。
 
-## 5. 消息协议
+## 5. 消息协议与安全边界
 
 自定义二进制协议（length-prefixed framing），详见 `docs/api-spec.md`。
 
@@ -128,14 +128,19 @@ offset 为全局递增逻辑偏移（相对 partition 首条消息，从 0 开�
 
 核心命令：`CREATE_TOPIC`、`DELETE_TOPIC`、`PRODUCE`、`FETCH`、`COMMIT_OFFSET`、`LIST_TOPIC`、`HEARTBEAT`。
 
-## 6. 高可用设计（复制，后续阶段）
+- 传输层可选 OpenSSL TLS，最低版本为 TLS 1.2；服务端启用 TLS 时证书和私钥必须有效，配置错误会导致启动失败，不会回退到明文。客户端可配置 CA 和服务器名称校验，服务端可要求客户端证书完成 mTLS。
+- 普通客户端在配置 `client_auth_token` 后，必须在请求载荷前附加 Token 认证前缀；认证失败返回 `UNAUTHENTICATED`，认证成功但 ACL 不允许时返回 `PERMISSION_DENIED`。
+- ACL 采用当前单 Token 权限模型：`admin` 管理 Topic/指标，`produce` 控制生产，`consume` 控制拉取与位点提交，并可分别限制生产和消费 Topic。空白名单表示不限制 Topic。
+- 复制请求使用独立的复制 Token、`REPLICATION` 标记、成员校验和日志连续性校验，不能用普通客户端 Token 代替；Token 仅负责身份校验，生产环境必须配合 TLS 或可信加密代理。
+
+## 6. 高可用设计（复制，P2 已实现）
 
 - **主从复制**：Producer 只写 Leader；Follower 定时从 Leader 拉取日志段增量，追加到本地存储。
 - **提交语义**：`PRODUCE` 的 ack 时机支持 `ack=0 / ack=1 / ack=all` 三档。
 - **故障切换**：基于元数据服务/一致性算法选主，切换后消费位点从 `log_start_offset` 恢复。
 - P2 已实现 `ReplicationCoordinator`、TCP `ReplicationClient`、内部复制 Fetch/Append、周期增量拉取、复制心跳和 quorum ack。当前选主为确定性健康节点选择，尚未达到 Raft/ZAB 的任期、多数派日志提交和网络分区安全保证。
 
-## 7. 模块接口（骨架）
+## 7. 模块接口
 
 ### 7.1 核心层 `include/mq/core`
 | 头文件 | 内容 |
@@ -160,21 +165,24 @@ offset 为全局递增逻辑偏移（相对 partition 首条消息，从 0 开�
 | `server/broker.h` | Broker 装配入口 |
 | `server/handler.h` | 命令分发 Handler |
 | `client/client.h` | 客户端 SDK 接口 |
+| `network/tls.h` | OpenSSL TLS 会话与非阻塞 I/O 封装 |
 
 ## 8. 构建与测试
 
 - CMake ≥ 3.16，`-DMQ_BUILD_TESTS=ON` 构建单元测试与集成测试。
 - 单元测试：`test/unit`（gtest），覆盖存储、编解码、环形队列。
-- 压测：`bench`（吞吐/延迟报告），`tools` 提供运维脚本（topic 管理、数据目录检查）。
+- 压测：`bench`（吞吐/延迟报告），`tools` 提供运维脚本（Topic 管理、数据目录检查）。
+- 安全构建：`-DMQ_ENABLE_TLS=ON` 启用 OpenSSL TLS 集成测试；`-DMQ_BUILD_FUZZERS=ON` 构建 Clang libFuzzer 入口。
+- CI：`.github/workflows/ci.yml` 覆盖格式检查、Linux Debug/TLS、ASan/UBSan、Clang Fuzz 和 Windows Debug；VM16 Release 与长期容量测试仍在本地验收范围。
 
-## 9. 里程碑（骨架 → MVP → 高可用）
+## 9. 里程碑（骨架 → MVP → 高可用 → 生产化）
 
 | 阶段 | 范围 |
 |------|------|
-| P0 骨架 | 目录/构建/占位接口（本次） |
+| P0 骨架 | 目录/构建/占位接口（已完成） |
 | P1 MVP | 单机持久化 Broker + 客户端，epoll Reactor，生产/消费全链路 |
 | P2 高可用 | 主从复制、ack 语义、故障切换 |
-| P3 生产化 | 监控、限流、配额、管理工具完善（进行中） |
+| P3 生产化 | 监控、限流、配额、管理工具、安全基线和回归门禁（核心能力已完成） |
 
 ### 9.1 P2 复制安全
 
@@ -189,3 +197,9 @@ Broker 支持按秒生产请求限流，默认值为 0（关闭）。限流在 B
 Broker 支持按 Topic 的生产字节配额，默认值为 0（关闭）。配额窗口为 1 秒，统计新增消息的 key/value 字节；单条消息在 WAL 写入前检查，批量请求先完成整批解析和配额预留后再逐条写入，复制内部请求绕过配额。超限返回 `QUOTA_EXCEEDED`，并通过 `METRICS` 暴露配置值和当前窗口聚合用量。
 
 P3 提供 `mq_admin` 只读管理工具：`topics` 复用 `LIST_TOPIC` 查询 Topic 元数据，`metrics` 复用 `METRICS` 输出 Prometheus 文本；工具使用 SDK 的连接超时和自动重连能力，不增加额外监听端口或第三方依赖。
+
+### 9.3 P3 安全验证与模糊测试
+
+- TLS 使用 OpenSSL 封装，服务端和客户端均通过统一的 `TlsSessionContext` 管理会话；非阻塞握手中的 `WANT_READ/WANT_WRITE` 状态由 Reactor 驱动，业务线程不直接操作 TLS 或 socket。
+- Broker 在统一入口先校验未知 flags、复制/客户端认证边界和 Token，再执行 ACL、角色、限流及业务分派；认证 Token 使用常量时间比较，错误响应不返回密钥或明文凭据。
+- `mq_protocol_fuzz_tests` 覆盖受限随机协议输入；`test/fuzz/protocol_fuzz.cc` 提供结构化合法帧与畸形输入混合的 libFuzzer 入口。当前本地已完成 2,000 次变异无崩溃，运行覆盖报告为 137 counters。

@@ -1,6 +1,6 @@
 # mq-project 模块详细设计
 
-> 版本: v0.1 · 更新: 2026-08-19
+> 版本: v0.2 · 更新: 2026-08-27
 > 本文档描述各模块**内部实现细节**，是编码时的实现依据；架构总览见 `docs/architecture.md`。
 
 ## 目录
@@ -10,6 +10,8 @@
 3. [并发模型（线程池 + Lock-Free Queue）](#3-并发模型线程池--lock-free-queue)
 4. [内存管理](#4-内存管理)
 5. [模块间数据流与接口约定](#5-模块间数据流与接口约定)
+6. [实现顺序建议（依赖拓扑）](#6-实现顺序建议依赖拓扑)
+7. [安全传输与访问控制](#7-安全传输与访问控制)
 
 ---
 
@@ -295,8 +297,6 @@ Reactor 收到完整帧 ──► MPMC 任务队列 ──► Worker 池
 - 写路径：写缓冲 → fsync → 更新 committed → 读路径才可见（release/acquire 配对）。
 - mmap 索引更新后 `msync` 时机与 fsync 对齐，避免索引超前于数据。
 
----
-
 ## 5. 模块间数据流与接口约定
 
 ```
@@ -332,3 +332,38 @@ Worker ──(Response)──▶ 所属 Sub Reactor 写队列 ──▶ EPOLLOUT
 5. `server`（组装 network + core，入口 main）
 6. `client`（仅依赖 protocol，可独立测试）
 7. `bench` / `tools`（验证吞吐与运维）
+
+## 7. 安全传输与访问控制
+
+### 7.1 TLS 会话与非阻塞状态
+
+- `TlsSessionContext` 统一封装 OpenSSL 上下文、证书/私钥加载、客户端 CA 校验、服务器名称校验和会话释放，网络层之外不暴露 OpenSSL 类型。
+- TLS 最低协议版本固定为 TLS 1.2。服务端启用 TLS 时证书、私钥和私钥匹配性检查均为启动前置条件；启用 mTLS 时还必须配置客户端 CA，并使用 `SSL_VERIFY_FAIL_IF_NO_PEER_CERT` 拒绝无证书客户端。
+- 握手、读写均运行在连接所属 Reactor 线程。`SSL_ERROR_WANT_READ`/`SSL_ERROR_WANT_WRITE` 映射为事件关注项，不能在 Reactor 中阻塞等待，也不能由 Worker 直接调用 socket 或 TLS 会话。
+- TLS 配置失败或握手失败直接关闭连接；启用 TLS 的构建和运行路径不得静默降级为明文。启用 TLS 时 Token 认证位于加密协议帧内；TLS 本身不替代身份认证和 ACL。
+
+### 7.2 请求认证前缀
+
+普通客户端启用 `AUTHENTICATION` flag 时，原命令 payload 统一转换为：
+
+```
+token_len(2) | token | original_payload
+```
+
+Broker 在业务解析前校验长度、Token 内容和 flag 边界，成功后移除认证前缀并清除 `AUTHENTICATION` 标记。未配置客户端 Token 时，带认证标记的请求仍会被拒绝，避免把伪造前缀当作业务字段解析。认证失败只返回 `UNAUTHENTICATED`，不暴露期望 Token。
+
+### 7.3 ACL 判定边界
+
+- `CREATE_TOPIC`、`DELETE_TOPIC`、`LIST_TOPIC`、`METRICS` 需要 `admin`。
+- `PRODUCE`、`PRODUCE_BATCH` 需要 `produce`，并匹配生产 Topic 白名单。
+- `FETCH`、`COMMIT_OFFSET` 需要 `consume`，并匹配消费 Topic 白名单。
+- `HEARTBEAT` 对已通过身份认证的普通客户端放行，用于维持会话；未知命令默认拒绝。
+- 当前 ACL 是单客户端 Token 共享一套权限，不是多用户/多角色凭据存储。配置 ACL 时必须同时配置 `client_auth_token`；没有 ACL 配置时，已认证 Token 保持兼容的全权限行为。
+
+### 7.4 复制认证边界
+
+复制请求必须同时满足 `REPLICATION` flag、允许的复制命令、已配置副本成员、独立复制 Token、任期/连续 offset 和请求字段校验。复制请求不能携带普通客户端 `AUTHENTICATION` flag，也不参与普通客户端 ACL、生产限流和 Topic 配额；复制 Token 不得复用给外部客户端。
+
+### 7.5 输入模糊测试
+
+协议编解码器同时由确定性单测、受限随机回归测试和 Clang libFuzzer 覆盖。Fuzz 入口构造合法请求/响应并混入原始畸形字节，重点验证长度字段、版本、flags、命令和 payload 边界；每次运行应限制输入规模和迭代次数，出现崩溃或 sanitizer 报告即视为门禁失败。

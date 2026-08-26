@@ -47,10 +47,13 @@ class StorageEngine {
   // 副本追加要求 offset 连续，借此发现复制缺口而不是静默覆盖数据。
   bool AppendReplica(const std::string& topic, std::uint32_t partition, const Message& message,
                      std::string* error = nullptr);
+  bool DeleteTopic(const std::string& topic, std::string* error = nullptr);
   // Read 以 max_bytes 限制单次返回量，防止消费者请求导致无界内存增长。
   bool Read(const std::string& topic, std::uint32_t partition, std::uint64_t start_offset,
             std::uint32_t max_bytes, std::vector<Message>* messages,
             std::string* error = nullptr) const;
+  bool NextOffset(const std::string& topic, std::uint32_t partition, std::uint64_t* offset,
+                  std::string* error = nullptr) const;
   bool Flush(std::string* error = nullptr);
   bool CleanupExpiredSegments(std::string* error = nullptr);
 

@@ -6,6 +6,7 @@
 #include <string>
 
 #include "mq/network/event_loop.h"
+#include "mq/network/tls.h"
 #include "mq/protocol/commands.h"
 
 namespace mq::network {
@@ -14,9 +15,10 @@ namespace mq::network {
 class TcpServer {
  public:
   using RequestHandler = std::function<protocol::Response(const protocol::Request&)>;
-  TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler);
+  TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler,
+            TlsOptions tls_options = {});
   TcpServer(std::string bind_address, std::uint16_t port, std::size_t worker_count,
-            RequestHandler handler);
+            RequestHandler handler, TlsOptions tls_options = {});
   ~TcpServer();
   bool Start();
   void Stop();

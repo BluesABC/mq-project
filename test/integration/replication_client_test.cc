@@ -57,23 +57,26 @@ int main() {
   std::filesystem::remove_all(root, error);
   mq::server::Broker broker(root);
   assert(broker.Open());
+  broker.ConfigureReplication("server", {}, 0, false, "test-token");
   assert(broker.Handle(CreateTopic()).status == mq::protocol::Status::kOk);
   const auto produced = broker.Handle(Produce());
   assert(produced.status == mq::protocol::Status::kOk);
   mq::network::TcpServer server("127.0.0.1", 0, 2,
                                 [&broker](const auto& request) { return broker.Handle(request); });
   assert(server.Start());
-  mq::server::ReplicationClient client("127.0.0.1", server.port());
+  mq::server::ReplicationClient client("127.0.0.1", server.port(), 1000, "test-token");
   std::vector<mq::core::Message> messages;
   assert(client.Fetch("replication", 0, 0, 1024, &messages));
   assert(messages.size() == 1 && messages[0].value == "v");
-  assert(client.Heartbeat("follower-a", 1));
+  assert(client.Heartbeat("replication", 0, "follower-a", 1));
   server.Stop();
-  assert(!client.Heartbeat("follower-a", 1));
+  assert(!client.Heartbeat("replication", 0, "follower-a", 1));
   const auto follower_root = root / "follower";
   const auto leader_root = root / "leader";
   mq::server::Broker follower(follower_root);
   assert(follower.Open());
+  follower.ConfigureReplication("follower", {{"leader", "127.0.0.1", 0, true}}, 2, true,
+                                "test-token");
   assert(follower.Handle(CreateTopic()).status == mq::protocol::Status::kOk);
   mq::network::TcpServer follower_server(
       "127.0.0.1", 0, 2, [&follower](const auto& request) { return follower.Handle(request); });
@@ -81,9 +84,13 @@ int main() {
   mq::server::Broker leader(leader_root);
   assert(leader.Open());
   assert(leader.Handle(CreateTopic()).status == mq::protocol::Status::kOk);
-  leader.ConfigureReplication("leader", {{"follower", "127.0.0.1", follower_server.port()}}, 2);
+  leader.ConfigureReplication("leader", {{"follower", "127.0.0.1", follower_server.port()}}, 2,
+                              false, "test-token");
+  leader.StartReplication();
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
   assert(leader.Handle(ProduceAckAll()).status == mq::protocol::Status::kOk);
   follower_server.Stop();
+  leader.StopReplication();
   assert(leader.Handle(ProduceAckAll()).status == mq::protocol::Status::kStorageError);
   std::filesystem::remove_all(follower_root, error);
   std::filesystem::remove_all(leader_root, error);

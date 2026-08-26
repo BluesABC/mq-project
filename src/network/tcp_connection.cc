@@ -56,7 +56,7 @@ bool TcpConnection::Send(std::string bytes) {
   // Worker 线程只投递发送任务，避免直接访问由 Reactor 独占的写队列。
   std::shared_ptr<TcpConnection> connection = shared_from_this();
   return loop_->QueueInLoop([connection, bytes = std::move(bytes)] {
-    if (connection->IsOpen()) connection->AppendWrite(bytes);
+    if (connection->IsOpen() && !connection->AppendWrite(bytes)) connection->Close();
   });
 }
 
@@ -99,7 +99,8 @@ void TcpConnection::Close() {
 
 bool TcpConnection::AppendWrite(std::string_view bytes) {
   if (!loop_->IsInLoopThread() || !IsOpen()) return false;
-  if (bytes.size() > write_capacity_ - queued_write_bytes_) return false;
+  if (queued_write_bytes_ > write_capacity_ || bytes.size() > write_capacity_ - queued_write_bytes_)
+    return false;
   write_queue_.emplace_back(bytes);
   queued_write_bytes_ += bytes.size();
   return true;

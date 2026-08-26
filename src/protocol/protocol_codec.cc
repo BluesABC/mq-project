@@ -35,10 +35,6 @@ bool ValidCommon(std::string_view frame, std::size_t header, std::size_t payload
     if (error != nullptr) *error = "invalid magic or header";
     return false;
   }
-  if (version != kCurrentVersion) {
-    if (error != nullptr) *error = "unsupported protocol version";
-    return false;
-  }
   if (payload_len > kMaxPayloadBytes || payload_len != frame.size() - payload_offset) {
     if (error != nullptr) *error = "invalid payload length";
     return false;
@@ -138,7 +134,7 @@ bool RequestStreamDecoder::Push(std::string_view bytes, std::vector<Request>* re
   buffer_.append(bytes.data(), bytes.size());
   while (true) {
     if (buffer_.size() < 20) return true;
-    if (Get16(buffer_, 0) != kMagic || static_cast<std::uint8_t>(buffer_[2]) != kCurrentVersion) {
+    if (Get16(buffer_, 0) != kMagic) {
       if (error != nullptr) *error = "invalid request stream header";
       buffer_.clear();
       return false;

@@ -1,6 +1,7 @@
 ﻿#include "mq/client/mq_client.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -8,6 +9,7 @@
 #include <thread>
 
 #include "mq/protocol/protocol_codec.h"
+#include "mq/network/tls.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -103,14 +105,27 @@ struct MqProducer::Impl {
   std::uint64_t sequence = 0;
   std::chrono::milliseconds backoff{100};
   std::string error;
+  std::string auth_token;
+  network::TlsOptions tls_options;
+  std::unique_ptr<network::TlsSessionContext> tls_context;
+  network::TlsHandle tls_session = nullptr;
   Impl() {
-    producer_id =
-        static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    static std::atomic<std::uint64_t> sequence{1};
+    std::random_device random;
+    const auto clock = static_cast<std::uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    producer_id = (static_cast<std::uint64_t>(random()) << 32) ^ random() ^ clock ^
+                  sequence.fetch_add(1, std::memory_order_relaxed);
+    if (producer_id == 0) producer_id = sequence.fetch_add(1, std::memory_order_relaxed);
   }
   ~Impl() {
     Close();
   }
   void Close() {
+    if (tls_session != nullptr && tls_context != nullptr) {
+      tls_context->CloseSession(tls_session);
+      tls_session = nullptr;
+    }
     if (socket != kInvalidSocket) {
       CloseSocket(socket);
       socket = kInvalidSocket;
@@ -149,6 +164,29 @@ struct MqProducer::Impl {
           ::connect(socket, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0;
       freeaddrinfo(result);
       if (connected) {
+        if (tls_options.enabled) {
+          if (!tls_context)
+            tls_context = network::TlsSessionContext::CreateClient(tls_options, &error);
+          if (!tls_context) {
+            Close();
+            continue;
+          }
+          tls_session = tls_context->NewSession(static_cast<int>(socket), false, &error);
+          if (tls_session == nullptr) {
+            Close();
+            continue;
+          }
+          for (;;) {
+            const auto handshake = tls_context->Handshake(tls_session, &error);
+            if (handshake == network::TlsIoResult::kOk) break;
+            if (handshake != network::TlsIoResult::kWantRead &&
+                handshake != network::TlsIoResult::kWantWrite) {
+              Close();
+              break;
+            }
+          }
+          if (tls_session == nullptr) continue;
+        }
         endpoint_index = index;
         return true;
       }
@@ -157,9 +195,53 @@ struct MqProducer::Impl {
     endpoint_index = (endpoint_index + 1) % endpoints.size();
     return false;
   }
+  bool SendAllData(std::string_view data) {
+    if (tls_session == nullptr) return SendAll(socket, data);
+    std::size_t sent = 0;
+    while (sent < data.size()) {
+      std::size_t written = 0;
+      std::string tls_error;
+      const auto result = tls_context->Write(tls_session, data.data() + sent, data.size() - sent,
+                                             &written, &tls_error);
+      if (result != network::TlsIoResult::kOk || written == 0) {
+        error = tls_error.empty() ? "TLS send failed" : tls_error;
+        return false;
+      }
+      sent += written;
+    }
+    return true;
+  }
+  bool ReceiveAllData(char* data, std::size_t size) {
+    if (tls_session == nullptr) return ReceiveAll(socket, data, size);
+    std::size_t received = 0;
+    while (received < size) {
+      std::size_t read = 0;
+      std::string tls_error;
+      const auto result = tls_context->Read(tls_session, data + received, size - received, &read,
+                                            &tls_error);
+      if (result != network::TlsIoResult::kOk || read == 0) {
+        error = tls_error.empty() ? "TLS receive failed" : tls_error;
+        return false;
+      }
+      received += read;
+    }
+    return true;
+  }
   bool Call(mq::protocol::Request request, mq::protocol::Response* response) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     // 每次重试都重新建立连接，但 deadline 不重置，保证调用方的超时有明确上界。
+    if (!auth_token.empty()) {
+      if (auth_token.size() > 65535) {
+        error = "auth token exceeds protocol limit";
+        return false;
+      }
+      std::string payload;
+      Put16(&payload, static_cast<std::uint16_t>(auth_token.size()));
+      payload.append(auth_token);
+      payload.append(request.payload);
+      request.payload = std::move(payload);
+      request.flags |= protocol::kFlagAuthentication;
+    }
     while (std::chrono::steady_clock::now() < deadline) {
       if (!Connect()) {
         std::this_thread::sleep_for(backoff);
@@ -170,9 +252,9 @@ struct MqProducer::Impl {
       }
       request.request_id = request_id++;
       std::string frame;
-      if (mq::protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAll(socket, frame)) {
+      if (mq::protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAllData(frame)) {
         char header[18];
-        if (ReceiveAll(socket, header, sizeof(header))) {
+        if (ReceiveAllData(header, sizeof(header))) {
           const auto payload_size = Get32(std::string_view(header, sizeof(header)), 14);
           if (payload_size > mq::protocol::kMaxPayloadBytes) {
             error = "response payload too large";
@@ -181,8 +263,13 @@ struct MqProducer::Impl {
           }
           std::string full(header, sizeof(header));
           full.resize(18 + payload_size);
-          if (ReceiveAll(socket, full.data() + 18, payload_size) &&
+          if (ReceiveAllData(full.data() + 18, payload_size) &&
               mq::protocol::ProtocolCodec::DecodeResponse(full, response, &error)) {
+            if (response->request_id != request.request_id) {
+              error = "response request_id mismatch";
+              Close();
+              continue;
+            }
             if (response->status == mq::protocol::Status::kNotLeader && endpoints.size() > 1) {
               Close();
               endpoint_index = (endpoint_index + 1) % endpoints.size();
@@ -199,11 +286,23 @@ struct MqProducer::Impl {
     return false;
   }
   bool SendWithoutResponse(mq::protocol::Request request) {
+    if (!auth_token.empty()) {
+      if (auth_token.size() > 65535) {
+        error = "auth token exceeds protocol limit";
+        return false;
+      }
+      std::string payload;
+      Put16(&payload, static_cast<std::uint16_t>(auth_token.size()));
+      payload.append(auth_token);
+      payload.append(request.payload);
+      request.payload = std::move(payload);
+      request.flags |= protocol::kFlagAuthentication;
+    }
     if (!Connect()) return false;
     request.request_id = request_id++;
     std::string frame;
-    const bool sent =
-        mq::protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAll(socket, frame);
+    const bool sent = mq::protocol::ProtocolCodec::EncodeRequest(request, &frame) &&
+                      SendAllData(frame);
     Close();
     return sent;
   }
@@ -238,6 +337,11 @@ bool MqProducer::produce(const std::string& topic, const std::string& key,
 }
 bool MqProducer::produce(const std::string& topic, const std::string& key, const std::string& value,
                          AckMode ack, ProduceResult* result) {
+  if (key.size() > 65535 || value.empty() || value.size() > 1024 * 1024 ||
+      impl_->sequence == UINT64_MAX) {
+    impl_->error = "message or sequence exceeds limit";
+    return false;
+  }
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kProduce;
   request.topic = topic;
@@ -262,6 +366,17 @@ bool MqProducer::produce(const std::string& topic, const std::string& key, const
 bool MqProducer::produceBatch(const std::string& topic,
                               const std::vector<ProducerMessage>& messages, AckMode ack,
                               std::vector<ProduceResult>* results) {
+  if (messages.empty() || messages.size() > 10000 ||
+      impl_->sequence > UINT64_MAX - messages.size()) {
+    impl_->error = "batch or sequence exceeds limit";
+    return false;
+  }
+  for (const auto& message : messages) {
+    if (message.key.size() > 65535 || message.value.empty() || message.value.size() > 1024 * 1024) {
+      impl_->error = "message exceeds limit";
+      return false;
+    }
+  }
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kProduceBatch;
   request.topic = topic;
@@ -354,6 +469,18 @@ void MqProducer::close() {
 void MqProducer::setTimeoutMs(std::uint32_t timeout_ms) {
   impl_->timeout_ms = timeout_ms == 0 ? 5000 : timeout_ms;
 }
+void MqProducer::setAuthToken(std::string token) {
+  if (token.size() > 65535) {
+    impl_->error = "auth token exceeds protocol limit";
+    return;
+  }
+  impl_->auth_token = std::move(token);
+}
+void MqProducer::setTlsOptions(network::TlsOptions options) {
+  impl_->tls_options = std::move(options);
+  impl_->Close();
+  impl_->tls_context.reset();
+}
 void MqProducer::setProducerId(std::uint64_t producer_id) {
   impl_->producer_id = producer_id;
 }
@@ -408,6 +535,8 @@ std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
   request.command = mq::protocol::Command::kFetch;
   request.topic = impl_->topic;
   Put32(&request.payload, impl_->partition);
+  Put16(&request.payload, static_cast<std::uint16_t>(impl_->group.size()));
+  request.payload.append(impl_->group);
   Put64(&request.payload, impl_->next_offset);
   Put32(&request.payload, 1024 * 1024);
   const auto old = impl_->timeout_ms;
@@ -485,6 +614,18 @@ void MqConsumer::close() {
 }
 void MqConsumer::setTimeoutMs(std::uint32_t timeout_ms) {
   impl_->timeout_ms = timeout_ms == 0 ? 5000 : timeout_ms;
+}
+void MqConsumer::setAuthToken(std::string token) {
+  if (token.size() > 65535) {
+    impl_->error = "auth token exceeds protocol limit";
+    return;
+  }
+  impl_->auth_token = std::move(token);
+}
+void MqConsumer::setTlsOptions(network::TlsOptions options) {
+  impl_->tls_options = std::move(options);
+  impl_->Close();
+  impl_->tls_context.reset();
 }
 const std::string& MqConsumer::lastError() const {
   return impl_->error;

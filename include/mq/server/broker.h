@@ -27,6 +27,15 @@ struct ReplicationPeer {
   bool leader = false;
 };
 
+// 同一客户端 Token 共享一套 ACL；空的 Topic 列表表示不限制 Topic。
+struct ClientAuthorization {
+  bool allow_admin = true;
+  bool allow_produce = true;
+  bool allow_consume = true;
+  std::vector<std::string> produce_topics;
+  std::vector<std::string> consume_topics;
+};
+
 class Broker {
  public:
   explicit Broker(std::filesystem::path data_dir);
@@ -35,7 +44,9 @@ class Broker {
 
   bool Open(std::string* error = nullptr);
   void ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers,
-                            std::size_t quorum = 0, bool follower = false);
+                            std::size_t quorum = 0, bool follower = false,
+                            std::string auth_token = {});
+  void ConfigureClientAuth(std::string auth_token, ClientAuthorization authorization = {});
   void ConfigureRateLimit(std::uint64_t produce_requests_per_second);
   void ConfigureTopicQuota(std::uint64_t produce_bytes_per_second);
   void StartReplication();
@@ -63,6 +74,12 @@ class Broker {
   bool Replicate(const std::string& topic, std::uint32_t partition, const core::Message& message);
   bool AllowProduceRequest();
   bool AllowTopicBytes(const std::string& topic, std::uint64_t bytes);
+  bool ValidateReplicationRequest(const protocol::Request& request,
+                                  protocol::Request* normalized) const;
+  bool ValidateClientAuth(const protocol::Request& request, protocol::Request* normalized) const;
+  bool AuthorizeClientRequest(const protocol::Request& request) const;
+  static bool TopicAllowed(const std::vector<std::string>& topics, const std::string& topic);
+  static std::string PartitionKey(const std::string& topic, std::uint32_t partition);
 
   core::StorageEngine storage_;
   core::TopicMetadataStore metadata_store_;
@@ -73,9 +90,17 @@ class Broker {
   std::mutex topic_metadata_mutex_;
   bool opened_ = false;
   std::mutex idempotency_mutex_;
-  std::unordered_map<std::string, protocol::Response> idempotency_cache_;
+  struct IdempotencyEntry {
+    protocol::Response response;
+    std::chrono::steady_clock::time_point expires_at;
+  };
+  std::unordered_map<std::string, IdempotencyEntry> idempotency_cache_;
   std::string node_id_ = "node-local";
   std::vector<ReplicationPeer> replication_peers_;
+  std::string replication_auth_token_;
+  std::string client_auth_token_;
+  ClientAuthorization client_authorization_;
+  bool replication_configured_ = false;
   std::size_t replication_quorum_ = 0;
   std::unique_ptr<class ReplicationCoordinator> replication_coordinator_;
   bool follower_ = false;
@@ -90,8 +115,8 @@ class Broker {
   std::atomic<std::uint64_t> error_count_{0};
   std::mutex rate_limit_mutex_;
   std::uint64_t produce_rate_limit_ = 0;
-  std::uint64_t produce_window_count_ = 0;
-  std::chrono::steady_clock::time_point produce_window_start_ = std::chrono::steady_clock::now();
+  long double produce_tokens_ = 0;
+  std::chrono::steady_clock::time_point produce_last_refill_ = std::chrono::steady_clock::now();
   struct TopicQuotaWindow {
     std::uint64_t bytes = 0;
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();

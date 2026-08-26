@@ -1,0 +1,105 @@
+name: mq-project CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 6"
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+      - name: Check C++ formatting
+        shell: bash
+        run: |
+          mapfile -t files < <(git ls-files '*.h' '*.cpp')
+          clang-format-18 --dry-run --Werror "${files[@]}"
+
+  linux-debug:
+    name: Linux Debug
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DMQ_BUILD_TESTS=ON -DMQ_BUILD_TOOLS=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  linux-tls:
+    name: Linux TLS
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSSL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev openssl
+      - name: Configure
+        run: cmake -S . -B build-tls -DMQ_BUILD_TESTS=ON -DMQ_BUILD_TOOLS=ON -DMQ_ENABLE_TLS=ON
+      - name: Build
+        run: cmake --build build-tls --parallel
+      - name: Test
+        run: ctest --test-dir build-tls --output-on-failure
+
+  linux-sanitizers:
+    name: Linux ASan UBSan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-sanitize -DMQ_BUILD_TESTS=ON -DMQ_BUILD_TOOLS=OFF -DMQ_ENABLE_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build-sanitize --parallel
+      - name: Test
+        run: ctest --test-dir build-sanitize --output-on-failure
+
+  fuzz:
+    name: Clang libFuzzer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang and LLVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+      - name: Configure
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: cmake -S . -B build-fuzzer -DMQ_BUILD_TESTS=ON -DMQ_BUILD_TOOLS=OFF -DMQ_BUILD_FUZZERS=ON
+      - name: Build
+        run: cmake --build build-fuzzer --parallel
+      - name: Regression tests
+        run: ctest --test-dir build-fuzzer --output-on-failure
+      - name: Guided fuzz smoke test
+        run: |
+          mkdir -p /tmp/mq-fuzz-seed /tmp/mq-fuzz-artifact
+          printf '\x4d\x51\x01\x30' > /tmp/mq-fuzz-seed/heartbeat
+          ./build-fuzzer/mq_protocol_libfuzzer \
+            -seed=7 -runs=2000 \
+            -artifact_prefix=/tmp/mq-fuzz-artifact/ \
+            /tmp/mq-fuzz-seed
+
+  windows:
+    name: Windows Debug
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DMQ_BUILD_TESTS=ON -DMQ_BUILD_TOOLS=ON
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+      - name: Test
+        run: ctest --test-dir build -C Debug --output-on-failure

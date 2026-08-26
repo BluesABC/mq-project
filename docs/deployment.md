@@ -1,6 +1,6 @@
 # mq-project 部署运维文档
 
-> 版本: v0.1 · 更新: 2026-08-19 · 状态: P1 开发前规划
+> 版本: v0.2 · 更新: 2026-08-27 · 状态: P3 核心能力已完成，生产容量专项待验
 
 ## 1. 部署拓扑
 
@@ -39,6 +39,15 @@ cmake --install build --prefix /opt/mq
 |------|------|------|
 | `listen.address` | `0.0.0.0` | 监听地址 |
 | `listen.port` | `9092` | 监听端口 |
+| `client_auth_token` | 空 | 普通客户端 Token；配置后拒绝未鉴权请求，禁止提交明文密钥到仓库 |
+| `client_auth_permissions` | 空 | 已认证客户端权限，逗号分隔的 `admin`/`produce`/`consume`；为空时保持兼容的全权限策略；配置 ACL 时必须同时配置 Token |
+| `client_auth_produce_topics` | 空 | 生产 Topic 白名单，逗号分隔；为空表示所有 Topic |
+| `client_auth_consume_topics` | 空 | 消费 Topic 白名单，逗号分隔；为空表示所有 Topic |
+| `tls_enabled` | `false` | 启用 TLS；启用后证书和私钥为必填 |
+| `tls_certificate_file` | 空 | Broker PEM 证书路径 |
+| `tls_private_key_file` | 空 | Broker PEM 私钥路径，限制文件权限 |
+| `tls_ca_file` | 空 | mTLS 客户端 CA；要求客户端证书时必填 |
+| `tls_require_client_certificate` | `false` | 是否启用双向 TLS 证书校验 |
 | `data_dir` | `/var/lib/mq` | 数据目录（禁止共用 NFS） |
 | `threads.reactor` | CPU 核数（自动模式上限 32） | Sub Reactor 线程数 |
 | `threads.worker` | CPU 核数 × 2 | Worker 线程数 |
@@ -78,7 +87,36 @@ P2 复制配置示例：
 node_id = node-leader
 replica_role = leader
 replica_peers = node-follower:127.0.0.1:9093
+replication_auth_token = replace-with-a-long-random-secret
 ```
+
+普通客户端鉴权配置示例：
+
+```ini
+client_auth_token = replace-with-a-long-random-secret
+client_auth_permissions = produce,consume
+client_auth_produce_topics = orders,events
+client_auth_consume_topics = orders,events
+```
+
+SDK 使用 `setAuthToken` 设置同一 Token；`mq_admin` 使用 `--auth-token`。权限不足返回 `PERMISSION_DENIED`，缺失或错误 Token 返回 `UNAUTHENTICATED`。Token 鉴权不加密传输，生产环境必须配置 TLS 或放在可信 TLS 代理之后。
+
+TLS 单向校验配置示例：
+
+```ini
+tls_enabled = true
+tls_certificate_file = /etc/mq/tls/server.crt
+tls_private_key_file = /etc/mq/tls/server.key
+```
+
+启用 mTLS 时追加客户端 CA，并要求客户端证书：
+
+```ini
+tls_ca_file = /etc/mq/tls/client-ca.crt
+tls_require_client_certificate = true
+```
+
+服务端启动前会校验证书、私钥和私钥匹配性；mTLS 还会校验客户端 CA 配置。私钥不得提交到仓库，文件应限制为 Broker 运行用户可读。客户端 SDK 需要设置 CA 文件和服务器名称，证书校验失败或 TLS 握手失败时连接应当失败，不得回退到明文。
 
 Follower 将 `replica_role` 设为 `follower`，并把 Leader 放入 `replica_peers`。Follower 每 250ms 拉取各分区增量并按连续 offset 写入本地 WAL；Leader 周期发送心跳。`ack=all` 需要本地写入加至少一个可达副本确认，否则返回 `STORAGE_ERROR`。
 
@@ -148,7 +186,7 @@ tools/mq-stats --data-dir /var/lib/mq          # 段文件与积压统计
 - [ ] 配置项与容量规划核对（§3、§5.2）
 - [ ] `ulimit -n` / 文件描述符充足
 - [ ] 数据目录所在磁盘性能与剩余空间达标
-- [ ] 防火墙放行监听端口；无 TLS（明文）场景确认网络可信
+- [ ] 防火墙放行监听端口；生产环境启用 TLS 或确认前置可信 TLS 代理
 - [ ] 监控与告警接入（§5.3）
 - [ ] 压测达标（`docs/performance-baseline.md`）
 

@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "mq/core/logger.h"
 #include "mq/network/tcp_server.h"
@@ -29,6 +30,16 @@ struct Config {
   std::filesystem::path log_file;
   std::string node_id = "node-local";
   bool replica_follower = false;
+  std::string replication_auth_token;
+  std::string client_auth_token;
+  std::string client_auth_permissions;
+  std::string client_auth_produce_topics;
+  std::string client_auth_consume_topics;
+  bool tls_enabled = false;
+  std::filesystem::path tls_certificate_file;
+  std::filesystem::path tls_private_key_file;
+  std::filesystem::path tls_ca_file;
+  bool tls_require_client_certificate = false;
   std::vector<mq::server::ReplicationPeer> replica_peers;
 };
 std::string Trim(std::string value) {
@@ -36,6 +47,59 @@ std::string Trim(std::string value) {
   if (first == std::string::npos) return {};
   const auto last = value.find_last_not_of(" \t\r\n");
   return value.substr(first, last - first + 1);
+}
+bool ParseList(const std::string& text, std::vector<std::string>* values) {
+  if (values == nullptr) return false;
+  values->clear();
+  std::size_t begin = 0;
+  while (begin <= text.size()) {
+    const auto end = text.find(',', begin);
+    const auto item = Trim(text.substr(begin, end == std::string::npos ? std::string::npos
+                                                                        : end - begin));
+    if (item.empty()) return false;
+    values->push_back(item);
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  return true;
+}
+bool BuildClientAuthorization(const Config& config, mq::server::ClientAuthorization* authorization,
+                              std::string* error) {
+  if (authorization == nullptr) return false;
+  *authorization = {};
+  if (!config.client_auth_permissions.empty()) {
+    authorization->allow_admin = false;
+    authorization->allow_produce = false;
+    authorization->allow_consume = false;
+    std::vector<std::string> permissions;
+    if (!ParseList(config.client_auth_permissions, &permissions)) {
+      if (error) *error = "invalid client_auth_permissions";
+      return false;
+    }
+    for (const auto& permission : permissions) {
+      if (permission == "admin")
+        authorization->allow_admin = true;
+      else if (permission == "produce")
+        authorization->allow_produce = true;
+      else if (permission == "consume")
+        authorization->allow_consume = true;
+      else {
+        if (error) *error = "invalid client authorization permission";
+        return false;
+      }
+    }
+  }
+  if (!config.client_auth_produce_topics.empty() &&
+      !ParseList(config.client_auth_produce_topics, &authorization->produce_topics)) {
+    if (error) *error = "invalid client_auth_produce_topics";
+    return false;
+  }
+  if (!config.client_auth_consume_topics.empty() &&
+      !ParseList(config.client_auth_consume_topics, &authorization->consume_topics)) {
+    if (error) *error = "invalid client_auth_consume_topics";
+    return false;
+  }
+  return true;
 }
 bool Number(const std::string& text, std::uint64_t* value) {
   try {
@@ -103,6 +167,26 @@ bool LoadConfig(const std::filesystem::path& path, Config* config, std::string* 
       config->node_id = value;
     else if (key == "replica_role")
       config->replica_follower = value == "follower";
+    else if (key == "replication_auth_token")
+      config->replication_auth_token = value;
+    else if (key == "client_auth_token")
+      config->client_auth_token = value;
+    else if (key == "client_auth_permissions")
+      config->client_auth_permissions = value;
+    else if (key == "client_auth_produce_topics")
+      config->client_auth_produce_topics = value;
+    else if (key == "client_auth_consume_topics")
+      config->client_auth_consume_topics = value;
+    else if (key == "tls_enabled")
+      config->tls_enabled = value == "true" || value == "1";
+    else if (key == "tls_certificate_file")
+      config->tls_certificate_file = value;
+    else if (key == "tls_private_key_file")
+      config->tls_private_key_file = value;
+    else if (key == "tls_ca_file")
+      config->tls_ca_file = value;
+    else if (key == "tls_require_client_certificate")
+      config->tls_require_client_certificate = value == "true" || value == "1";
     else if (key == "replica_peers") {
       std::size_t begin = 0;
       while (begin < value.size()) {
@@ -131,6 +215,7 @@ bool LoadConfig(const std::filesystem::path& path, Config* config, std::string* 
       return false;
     }
   }
+  for (auto& peer : config->replica_peers) peer.leader = config->replica_follower;
   return true;
 }
 }  // namespace
@@ -150,6 +235,17 @@ int main(int argc, char** argv) {
       std::cerr << error << '\n';
       return 1;
     }
+    if (!config.replica_peers.empty() && config.replication_auth_token.empty()) {
+      std::cerr << "replication_auth_token is required when replica_peers is configured\n";
+      return 1;
+    }
+    if (config.client_auth_token.empty() &&
+        (!config.client_auth_permissions.empty() ||
+         !config.client_auth_produce_topics.empty() ||
+         !config.client_auth_consume_topics.empty())) {
+      std::cerr << "client_auth_token is required when client ACL is configured\n";
+      return 1;
+    }
     auto& logger = mq::core::Logger::Instance();
     if (!config.log_file.empty() && !logger.SetFile(config.log_file, 64ULL * 1024 * 1024, &error)) {
       std::cerr << error << '\n';
@@ -165,13 +261,27 @@ int main(int argc, char** argv) {
       logger.Log(mq::core::LogLevel::kCritical, error);
       return 1;
     }
-    broker.ConfigureReplication(config.node_id, config.replica_peers, 0, config.replica_follower);
+    broker.ConfigureReplication(config.node_id, config.replica_peers, 0, config.replica_follower,
+                                config.replication_auth_token);
+    mq::server::ClientAuthorization authorization;
+    if (!BuildClientAuthorization(config, &authorization, &error)) {
+      std::cerr << error << '\n';
+      return 1;
+    }
+    broker.ConfigureClientAuth(config.client_auth_token, std::move(authorization));
+    mq::network::TlsOptions tls_options;
+    tls_options.enabled = config.tls_enabled;
+    tls_options.certificate_file = config.tls_certificate_file.string();
+    tls_options.private_key_file = config.tls_private_key_file.string();
+    tls_options.ca_file = config.tls_ca_file.string();
+    tls_options.require_client_certificate = config.tls_require_client_certificate;
     broker.ConfigureRateLimit(config.produce_rate_limit);
     broker.ConfigureTopicQuota(config.topic_produce_quota_bytes);
     broker.StartReplication();
     mq::network::TcpServer server(
         config.bind_address, config.bind_port, config.sub_reactor_threads,
-        [&broker](const mq::protocol::Request& request) { return broker.Handle(request); });
+        [&broker](const mq::protocol::Request& request) { return broker.Handle(request); },
+        std::move(tls_options));
     if (!server.Start()) {
       logger.Log(mq::core::LogLevel::kCritical, "cannot start broker server");
       return 1;

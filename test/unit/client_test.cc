@@ -13,10 +13,12 @@ int main() {
   std::filesystem::remove_all(root, ec);
   mq::server::Broker broker(root);
   assert(broker.Open());
+  broker.ConfigureClientAuth("client-token");
   mq::network::TcpServer server(
       0, 2, [&broker](const mq::protocol::Request& request) { return broker.Handle(request); });
   assert(server.Start());
   mq::client::MqProducer producer;
+  producer.setAuthToken("client-token");
   assert(producer.connect("localhost", server.port()));
   assert(producer.createTopic("client", 1));
   std::vector<mq::client::TopicInfo> topics;
@@ -36,11 +38,18 @@ int main() {
   assert(producer.flush());
   assert(!producer.produce("client", "key", "quorum-required", mq::client::AckMode::kAll));
   mq::client::MqConsumer consumer;
+  consumer.setAuthToken("client-token");
   assert(consumer.connect("localhost", server.port()));
   assert(consumer.subscribe("client", "group"));
   auto first = consumer.poll();
   assert(first.has_value() && first->value == "one");
   assert(consumer.commit(1));
+  mq::client::MqConsumer resumed;
+  resumed.setAuthToken("client-token");
+  assert(resumed.connect("localhost", server.port()));
+  assert(resumed.subscribe("client", "group"));
+  auto resumed_message = resumed.poll();
+  assert(resumed_message.has_value() && resumed_message->value == "two");
   auto second = consumer.poll();
   auto third = consumer.poll();
   assert(second.has_value() && second->value == "two");

@@ -25,13 +25,18 @@ struct ElectionResult {
 };
 class ReplicationCoordinator {
  public:
+  using PartitionKey = std::string;
+
   ReplicationCoordinator(std::string node_id, ReplicaRole role = ReplicaRole::kLeader,
                          std::chrono::milliseconds heartbeat_timeout = std::chrono::seconds(10));
   ReplicaRole role() const;
   std::string nodeId() const;
   std::string leaderId() const;
   std::uint64_t term() const;
+  std::uint64_t lastLogIndex() const;
+  std::uint64_t lastLogTerm() const;
   std::uint64_t commitIndex() const;
+  std::uint64_t commitIndex(const PartitionKey& partition) const;
   std::uint64_t lastApplied() const;
   bool CanServeWrites() const;
   void SetLeader(std::string node_id);
@@ -40,15 +45,28 @@ class ReplicationCoordinator {
   void ObserveHeartbeat(
       const std::string& node_id, std::uint64_t replicated_offset,
       std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  void ObserveHeartbeat(
+      const PartitionKey& partition, const std::string& node_id, std::uint64_t replicated_offset,
+      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   bool ObserveAppend(std::uint64_t term, const std::string& leader_id,
                      std::uint64_t replicated_offset, std::uint64_t leader_commit,
                      std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
+  bool ObserveAppend(const PartitionKey& partition, std::uint64_t term,
+                     const std::string& leader_id, std::uint64_t replicated_offset,
+                     std::uint64_t leader_commit,
+                     std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   ElectionResult BeginElection();
   bool RequestVote(std::uint64_t term, const std::string& candidate_id);
+  bool RequestVote(std::uint64_t term, const std::string& candidate_id,
+                   std::uint64_t candidate_last_log_index, std::uint64_t candidate_last_log_term);
   bool ObserveVote(std::uint64_t term, const std::string& voter_id, bool granted);
   bool AdvanceCommit(std::uint64_t offset);
+  bool AdvanceCommit(const PartitionKey& partition, std::uint64_t offset);
   void RecordLocalOffset(std::uint64_t offset);
+  void RecordLocalOffset(const PartitionKey& partition, std::uint64_t offset);
   bool IsQuorumReplicated(std::uint64_t offset, std::size_t replica_count) const;
+  bool IsQuorumReplicated(const PartitionKey& partition, std::uint64_t offset,
+                          std::size_t replica_count) const;
   std::string ElectLeader(
       std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
   std::vector<ReplicaProgress> Snapshot(
@@ -69,5 +87,14 @@ class ReplicationCoordinator {
   std::uint64_t last_applied_ = 0;
   std::unordered_set<std::string> votes_;
   std::unordered_map<std::string, ReplicaProgress> replicas_;
+  struct PartitionState {
+    std::uint64_t local_offset = 0;
+    std::uint64_t commit_index = 0;
+    std::uint64_t last_applied = 0;
+    std::uint64_t last_log_term = 0;
+  };
+  std::unordered_map<PartitionKey, PartitionState> partition_states_;
+  std::unordered_map<PartitionKey, std::unordered_map<std::string, ReplicaProgress>>
+      partition_replicas_;
 };
 }  // namespace mq::server

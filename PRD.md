@@ -1,6 +1,6 @@
 # mq-project 需求文档（PRD）
 
-> 版本: v0.2 · 更新: 2026-08-19
+> 版本: v0.3 · 更新: 2026-08-27
 > 关联文档：`docs/architecture.md`（架构）、`docs/design-details.md`（实现细节）、`docs/api-spec.md`（协议）、`docs/test-plan.md`（测试）。
 
 ## 1. 背景与目标
@@ -121,7 +121,8 @@
 - 灾难恢复：数据目录完整性由 CRC32 校验 + 索引可重建保证；段文件损坏定位到具体 offset。
 
 ### 5.3 安全与运维
-- 明文 TCP + 可选简单鉴权（预留 token 校验位），不支持加密（不引入 TLS）。
+- TCP 默认仍兼容明文，但支持客户端 Token 鉴权；生产部署必须配置 TLS 或置于可信加密代理之后。
+- TLS 作为可选 OpenSSL 构建能力，启用时 Broker 与 SDK 必须完成证书校验；未找到 OpenSSL 开发包时不得伪报已启用。
 - 运维工具：`tools/` 提供 topic 管理、数据目录检查、段文件统计。
 - 监控指标（内置暴露，`/metrics` 或日志周期输出）：
   - 吞吐：生产/消费 TPS（按 topic 聚合）；
@@ -134,7 +135,7 @@
 ### 5.4 兼容性与平台
 - 平台：Linux 优先（epoll/io_uring）；Windows 可编译（select 兜底），不做性能承诺。
 - 编译器：GCC ≥ 9 / Clang ≥ 12；构建：CMake ≥ 3.16。
-- 第三方依赖：仅 spdlog + gtest，其余全部自研。
+- 第三方依赖：基础构建仅 spdlog + gtest；TLS 构建可选增加系统 OpenSSL（仅 `MQ_ENABLE_TLS=ON` 时启用）。
 
 ### 5.5 可维护性
 - 分层单向依赖（core ← network ← server；client 独立），模块可替换。
@@ -154,7 +155,6 @@
 
 - 跨数据中心复制、事务消息（两阶段提交）。
 - 消息回溯/时间旅行消费（仅支持 offset 定位）。
-- TLS 加密、鉴权体系（仅预留 token 位）。
 - 死信队列与延迟消息（P1 起按需评估）。
 
 ## 8. 成功度量

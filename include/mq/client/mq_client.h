@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "mq/core/storage_engine.h"
+#include "mq/network/tls.h"
 
 namespace mq::client {
 
@@ -45,6 +46,8 @@ class MqProducer {
   bool metrics(std::string* output);
   void close();
   void setTimeoutMs(std::uint32_t timeout_ms);
+  void setAuthToken(std::string token);
+  void setTlsOptions(network::TlsOptions options);
   void setProducerId(std::uint64_t producer_id);
   const std::string& lastError() const;
 
@@ -68,6 +71,8 @@ class MqConsumer {
   bool commit(std::uint64_t offset);
   void close();
   void setTimeoutMs(std::uint32_t timeout_ms);
+  void setAuthToken(std::string token);
+  void setTlsOptions(network::TlsOptions options);
   const std::string& lastError() const;
 
  public:

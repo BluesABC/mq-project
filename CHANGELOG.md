@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### P3 安全传输与客户端授权
+- 新增 OpenSSL TLS 1.2+ 传输层，支持 CA/服务器名称校验和可选双向 TLS；启用 TLS 但缺少 OpenSSL、证书或私钥时明确失败。
+- 新增客户端 Token 身份认证、`UNAUTHENTICATED`/`PERMISSION_DENIED` 状态码，以及 admin/produce/consume ACL 和 Topic 白名单。
+- SDK 支持 TLS/Token 配置，`mq_admin` 支持 `--auth-token`；新增认证与授权拒绝测试。
+
+### P3 引导式 Fuzz 与 CI
+- 新增受限随机协议回归测试和 Clang libFuzzer 入口，结构化覆盖合法请求/响应与畸形输入。
+- 固定种子完成 2,000 次 libFuzzer 变异，无崩溃，运行覆盖 137 counters。
+- 新增 GitHub Actions CI，覆盖 clang-format、Windows/Linux、TLS、ASan/UBSan 和 Fuzz 构建。
+- WSL `clang-format 18.1.3 --dry-run --Werror` 全仓库检查通过。
+
 ### P2 高可用与 Linux 验证
 - 增加任期、投票、多数派提交索引和网络分区写入保护。
 - 增加复制心跳、低任期请求拒绝、Follower 失联选举和客户端多 endpoint 故障切换。

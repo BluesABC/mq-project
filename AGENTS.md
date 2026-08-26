@@ -128,5 +128,5 @@ cmake -S . -B build -DMQ_BUILD_BENCH=ON
 
 ## 8. 当前状态与路线
 
-- 当前处于 **P0 骨架阶段**：目录、构建、文档已完成，业务逻辑未实现。
-- 后续按 `docs/architecture.md` §9 推进：P1 MVP（单机持久化 Broker）→ P2 高可用（复制/切换）→ P3 生产化。
+- 当前已完成 P1 MVP、P2 高可用和 P3 核心生产化安全能力；TLS、客户端 Token/ACL、复制认证、协议 Fuzz 和本地质量门禁均已验证。
+- 后续按 `docs/architecture.md` §9 推进生产专项：远程 CI 实际运行、证书轮换与密钥托管、长期容量/稳定性压测、快照与日志截断，以及多身份 Token/ACL 管理。

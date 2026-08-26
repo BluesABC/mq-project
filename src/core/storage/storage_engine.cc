@@ -80,7 +80,7 @@ bool SyncPath(const std::filesystem::path& path) {
   CloseHandle(handle);
   return result;
 #else
-  const int fd = open(path.c_str(), O_RDONLY);
+  const int fd = open(path.c_str(), O_RDWR);
   if (fd < 0) return false;
   const int result = fsync(fd);
   close(fd);
@@ -311,8 +311,10 @@ bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, st
                            .count();
   const bool sync =
       config_.fsync_policy == FsyncPolicy::kPerMessage ||
+      config_.fsync_policy == FsyncPolicy::kPerBatch ||
       (config_.fsync_policy == FsyncPolicy::kInterval && elapsed >= config_.fsync_interval_ms);
-  if (sync && (!SyncPath(current->path) || !SyncPath(current->index_path))) {
+  const bool index_exists = std::filesystem::exists(current->index_path);
+  if (sync && (!SyncPath(current->path) || (index_exists && !SyncPath(current->index_path)))) {
     if (error) *error = "WAL fsync failed";
     return false;
   }
@@ -396,12 +398,35 @@ bool StorageEngine::AppendReplica(const std::string& topic, std::uint32_t partit
                            .count();
   const bool sync =
       config_.fsync_policy == FsyncPolicy::kPerMessage ||
+      config_.fsync_policy == FsyncPolicy::kPerBatch ||
       (config_.fsync_policy == FsyncPolicy::kInterval && elapsed >= config_.fsync_interval_ms);
-  if (sync && (!SyncPath(current->path) || !SyncPath(current->index_path))) {
+  const bool index_exists = std::filesystem::exists(current->index_path);
+  if (sync && (!SyncPath(current->path) || (index_exists && !SyncPath(current->index_path)))) {
     if (error) *error = "WAL fsync failed";
     return false;
   }
   if (sync) target->last_sync = std::chrono::steady_clock::now();
+  return true;
+}
+
+bool StorageEngine::DeleteTopic(const std::string& topic, std::string* error) {
+  if (!IsValidTopicName(topic)) {
+    if (error) *error = "invalid topic";
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto it = partitions_.begin(); it != partitions_.end();) {
+    if ((*it)->topic == topic)
+      it = partitions_.erase(it);
+    else
+      ++it;
+  }
+  std::error_code ec;
+  std::filesystem::remove_all(data_dir_ / "queues" / TopicCode(topic), ec);
+  if (ec) {
+    if (error) *error = ec.message();
+    return false;
+  }
   return true;
 }
 
@@ -412,6 +437,10 @@ bool StorageEngine::Read(const std::string& topic, std::uint32_t partition,
   std::lock_guard<std::mutex> lock(mutex_);
   auto* target = GetPartition(topic, partition, error);
   if (!target) return false;
+  if (start_offset > target->next_offset) {
+    if (error) *error = "invalid offset";
+    return false;
+  }
   messages->clear();
   std::uint64_t bytes = 0;
   for (const auto& segment : target->segments)
@@ -426,12 +455,23 @@ bool StorageEngine::Read(const std::string& topic, std::uint32_t partition,
   return true;
 }
 
+bool StorageEngine::NextOffset(const std::string& topic, std::uint32_t partition,
+                               std::uint64_t* offset, std::string* error) const {
+  if (!IsValidTopicName(topic) || offset == nullptr) return false;
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto* target = GetPartition(topic, partition, error);
+  if (target == nullptr) return false;
+  *offset = target->next_offset;
+  return true;
+}
+
 bool StorageEngine::Flush(std::string* error) {
   std::lock_guard<std::mutex> lock(mutex_);
   for (const auto& partition : partitions_)
     for (const auto& segment : partition->segments) {
       segment->file.flush();
-      if (!segment->file || !SyncPath(segment->path) || !SyncPath(segment->index_path)) {
+      if (!segment->file || !SyncPath(segment->path) ||
+          (std::filesystem::exists(segment->index_path) && !SyncPath(segment->index_path))) {
         if (error) *error = "WAL flush failed";
         return false;
       }

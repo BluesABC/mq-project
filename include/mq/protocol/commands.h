@@ -38,6 +38,9 @@ enum class Status : std::uint8_t {
   kNotLeader = 0x17,
   kRateLimited = 0x18,
   kQuotaExceeded = 0x19,
+  kResourceExhausted = 0x1A,
+  kUnauthenticated = 0x1B,
+  kPermissionDenied = 0x1C,
   kInternalError = 0x20,
 };
 
@@ -48,6 +51,8 @@ constexpr std::uint16_t kAckAll = 0x0002;
 constexpr std::uint16_t kFlagProducerMetadata = 0x0004;
 constexpr std::uint16_t kFlagReplication = 0x0008;
 constexpr std::uint16_t kFlagReplicationTerm = 0x0010;
+// 开启客户端鉴权时，载荷前缀为 token_len(2) | token；业务载荷布局保持不变。
+constexpr std::uint16_t kFlagAuthentication = 0x0020;
 
 struct Request {
   // 请求和响应都携带 request_id，客户端可据此匹配异步响应并实现幂等。

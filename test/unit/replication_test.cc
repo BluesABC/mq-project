@@ -35,5 +35,19 @@ int main() {
   assert(election.term() == 1);
   assert(election.CanServeWrites() == false);
   assert(!election.ObserveAppend(0, "node-b", 1, 1));
+
+  mq::server::ReplicationCoordinator log_guard("node-a");
+  log_guard.RegisterReplica("node-b");
+  log_guard.RecordLocalOffset(10);
+  assert(!log_guard.RequestVote(1, "node-b", 9, 0));
+  assert(log_guard.RequestVote(1, "node-b", 10, 1));
+
+  mq::server::ReplicationCoordinator term_guard("node-a");
+  term_guard.RegisterReplica("node-b");
+  term_guard.RecordLocalOffset(10);
+  const auto term_round = term_guard.BeginElection();
+  term_guard.ObserveHeartbeat("node-b", 10, start);
+  assert(term_guard.ObserveVote(term_round.term, "node-b", true));
+  assert(!term_guard.AdvanceCommit(10));
   return 0;
 }

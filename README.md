@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-当前代码已经完成 P1 基础链路、P2 复制能力，并接入了部分 P3 生产化能力：
+当前代码已经完成 P1 基础链路、P2 复制能力，并完成 P3 核心生产化与安全验证：
 
 - Topic 创建、删除、查询和元数据持久化
 - 按 Topic/Partition 生产与消费，支持批量生产
@@ -17,9 +17,11 @@
 - Leader/Follower 增量复制、复制心跳、quorum ack 和客户端多端点重连
 - Prometheus 文本指标、生产限流和 Topic 字节配额
 - `mq_admin` 管理工具，可查询 Topic 和指标
+- 可选 OpenSSL TLS 1.2+、客户端 Token 认证及 admin/produce/consume ACL
+- 结构化协议回归测试、Clang libFuzzer 入口和 GitHub Actions CI 门禁
 - 单元测试、TCP 集成测试、复制测试和基准测试
 
-复制协调器目前还不是完整的 Raft/ZAB 实现，生产部署前应结合 `docs/deployment.md` 和故障恢复要求进行验证。项目默认使用明文 TCP，不提供 TLS 和完整鉴权体系。
+复制协调器目前还不是完整的 Raft/ZAB 实现，生产部署前应结合 `docs/deployment.md` 和故障恢复要求进行验证。TLS 默认关闭以保持兼容；生产部署必须启用 TLS 或置于可信 TLS 代理之后，并配置客户端 Token 与 ACL。
 
 ## 架构概览
 
@@ -61,6 +63,7 @@ Main Reactor -> Sub Reactors -> Worker Pool
   - Windows：支持 C++17 的 Visual Studio/MSVC
 - Linux 是主要性能验证平台；Windows 提供可编译和测试支持
 - 运行 Linux 测试脚本需要 `bash`
+- 启用 TLS 需要 OpenSSL 开发包；运行格式门禁需要 clang-format 18+
 
 项目尽量减少依赖。当前构建使用 C++ 标准库和系统线程/Socket 能力；测试目标使用仓库内的断言式测试代码，不要求额外安装 gtest。
 
@@ -104,6 +107,7 @@ Windows 下将可执行文件路径替换为 `build\Debug\mq_admin.exe`。完整
 
 ```text
 mq_admin metrics|topics [--host HOST] [--port PORT] [--timeout-ms MS]
+             [--auth-token TOKEN]
 ```
 
 ## 客户端 SDK
@@ -114,6 +118,7 @@ mq_admin metrics|topics [--host HOST] [--port PORT] [--timeout-ms MS]
 - Consumer：订阅 Topic 或指定分区、poll、commit
 - `AckMode::kZero`、`AckMode::kOne`、`AckMode::kAll`
 - 多 Broker endpoint 连接、超时配置和断线重连
+- `setAuthToken` 客户端身份认证，`setTlsOptions` TLS 证书校验配置
 
 最小生产流程示例：
 
@@ -150,6 +155,15 @@ int main() {
 | `retention_hours` | `168` | 数据保留时间 |
 | `produce_rate_limit` | `0` | 每秒生产请求数，`0` 表示关闭 |
 | `topic_produce_quota_bytes` | `0` | 每 Topic 每秒 key/value 字节配额，`0` 表示关闭 |
+| `client_auth_token` | 未设置 | 普通客户端 Token；配置后启用身份认证 |
+| `client_auth_permissions` | 未设置 | `admin`、`produce`、`consume` 权限列表 |
+| `client_auth_produce_topics` | 未设置 | 生产 Topic 白名单 |
+| `client_auth_consume_topics` | 未设置 | 消费 Topic 白名单 |
+| `tls_enabled` | `false` | 是否启用 TLS |
+| `tls_certificate_file` | 未设置 | Broker PEM 证书 |
+| `tls_private_key_file` | 未设置 | Broker PEM 私钥 |
+| `tls_ca_file` | 未设置 | mTLS 客户端 CA |
+| `tls_require_client_certificate` | `false` | 是否要求客户端证书 |
 | `node_id` | `node-local` | Broker 节点标识 |
 | `replica_role` | `leader` | `leader` 或 `follower` |
 | `replica_peers` | 未设置 | 复制节点，格式为 `node-id:host:port;...` |
@@ -181,6 +195,24 @@ cmake -S . -B build-sanitize \
   -DMQ_BUILD_TESTS=ON -DMQ_ENABLE_SANITIZERS=ON
 cmake --build build-sanitize -j
 ctest --test-dir build-sanitize --output-on-failure
+```
+
+TLS 构建与测试：
+
+```bash
+sudo apt-get install -y libssl-dev openssl
+cmake -S . -B build-tls -DMQ_BUILD_TESTS=ON -DMQ_ENABLE_TLS=ON
+cmake --build build-tls -j
+ctest --test-dir build-tls --output-on-failure
+```
+
+Clang 引导式 Fuzz：
+
+```bash
+cmake -S . -B build-fuzzer -DMQ_BUILD_TESTS=ON -DMQ_BUILD_FUZZERS=ON \
+  -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-fuzzer -j
+ctest --test-dir build-fuzzer --output-on-failure
 ```
 
 提交前还应执行：
@@ -224,4 +256,3 @@ tools/            管理工具、基准检查和发布清单
 ## 许可证与项目说明
 
 仓库当前未提供独立的 LICENSE 文件。对外发布或在其他项目中集成前，请先确认项目维护者的授权和许可证安排。
-

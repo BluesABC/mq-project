@@ -11,6 +11,7 @@
 #include "mq/core/memory_pool.h"
 #include "mq/core/thread_pool.h"
 #include "mq/network/tcp_connection.h"
+#include "mq/network/tls.h"
 #include "mq/protocol/protocol_codec.h"
 
 #ifdef _WIN32
@@ -30,7 +31,7 @@
 namespace mq::network {
 
 struct TcpServer::Impl {
-  static constexpr std::size_t kConnectionReadBufferBytes = 64 * 1024;
+  static constexpr std::size_t kConnectionReadBufferBytes = 256 * 1024;
   static constexpr std::size_t kConnectionWriteBufferBytes = protocol::kMaxPayloadBytes + 18;
   static std::size_t DefaultWorkers(std::size_t count) {
     constexpr std::size_t kMaxAutomaticWorkers = 32;
@@ -39,18 +40,21 @@ struct TcpServer::Impl {
     if (cores == 0) return 1;
     return std::min<std::size_t>(cores, kMaxAutomaticWorkers);
   }
-  Impl(std::uint16_t configured_port, std::size_t worker_count, RequestHandler configured_handler)
+  Impl(std::uint16_t configured_port, std::size_t worker_count, RequestHandler configured_handler,
+       TlsOptions configured_tls_options)
       : requested_port(configured_port),
         worker_count(DefaultWorkers(worker_count)),
         handler(std::move(configured_handler)),
+        tls_options(std::move(configured_tls_options)),
         workers(DefaultWorkers(worker_count), 1024),
         loop(1024) {}
   Impl(std::string address, std::uint16_t configured_port, std::size_t count,
-       RequestHandler configured_handler)
+       RequestHandler configured_handler, TlsOptions configured_tls_options)
       : requested_address(std::move(address)),
         requested_port(configured_port),
         worker_count(DefaultWorkers(count)),
         handler(std::move(configured_handler)),
+        tls_options(std::move(configured_tls_options)),
         workers(DefaultWorkers(count), 1024),
         loop(1024) {}
   std::string requested_address = "127.0.0.1";
@@ -58,6 +62,8 @@ struct TcpServer::Impl {
   std::size_t worker_count;
   std::atomic<std::uint16_t> bound_port{0};
   RequestHandler handler;
+  TlsOptions tls_options;
+  std::unique_ptr<TlsSessionContext> tls_context;
   core::ThreadPool workers;
   EventLoop loop;
   std::atomic<bool> started{false};
@@ -65,12 +71,18 @@ struct TcpServer::Impl {
   struct Client {
     std::shared_ptr<core::MemoryPool> pool;
     std::shared_ptr<TcpConnection> connection;
+    TlsHandle tls_session = nullptr;
+    bool tls_ready = false;
+    bool tls_want_write = false;
   };
   SOCKET listener = INVALID_SOCKET;
   std::map<SOCKET, Client> clients;
   std::uint64_t next_id = 1;
 
   void CloseClient(SOCKET socket) {
+    const auto it = clients.find(socket);
+    if (it != clients.end() && it->second.tls_session != nullptr)
+      tls_context->CloseSession(it->second.tls_session);
     closesocket(socket);
     clients.erase(socket);
   }
@@ -81,7 +93,8 @@ struct TcpServer::Impl {
     FD_SET(listener, &reads);
     for (const auto& item : clients) {
       FD_SET(item.first, &reads);
-      if (!item.second.connection->Writable().empty()) FD_SET(item.first, &writes);
+      if (item.second.tls_want_write || !item.second.connection->Writable().empty())
+        FD_SET(item.first, &writes);
     }
     timeval timeout{};
     if (select(0, &reads, &writes, nullptr, &timeout) <= 0) return;
@@ -95,16 +108,61 @@ struct TcpServer::Impl {
           continue;
         }
         Client client;
-        client.pool = std::make_shared<core::MemoryPool>(128 * 1024);
+        client.pool = std::make_shared<core::MemoryPool>(512 * 1024);
         client.connection = std::make_shared<TcpConnection>(
             next_id++, &loop, client.pool, kConnectionReadBufferBytes, kConnectionWriteBufferBytes);
+        if (tls_options.enabled) {
+          std::string error;
+          client.tls_session = tls_context->NewSession(static_cast<int>(socket), true, &error);
+          if (client.tls_session == nullptr) {
+            closesocket(socket);
+            continue;
+          }
+        } else {
+          client.tls_ready = true;
+        }
         clients.emplace(socket, std::move(client));
       }
     char input[8192];
     std::vector<SOCKET> closed;
     for (auto& item : clients) {
+      if (!item.second.tls_ready &&
+          (FD_ISSET(item.first, &reads) || FD_ISSET(item.first, &writes))) {
+        std::string error;
+        const auto result = tls_context->Handshake(item.second.tls_session, &error);
+        if (result == TlsIoResult::kOk) {
+          item.second.tls_ready = true;
+          item.second.tls_want_write = false;
+        } else if (result == TlsIoResult::kWantWrite) {
+          item.second.tls_want_write = true;
+        } else if (result == TlsIoResult::kWantRead) {
+          item.second.tls_want_write = false;
+        } else {
+          closed.push_back(item.first);
+          continue;
+        }
+        if (!item.second.tls_ready) continue;
+      }
       if (FD_ISSET(item.first, &reads)) {
-        const int count = recv(item.first, input, sizeof(input), 0);
+        int count = 0;
+        if (item.second.tls_session != nullptr) {
+          std::size_t read = 0;
+          std::string error;
+          const auto result =
+              tls_context->Read(item.second.tls_session, input, sizeof(input), &read, &error);
+          if (result == TlsIoResult::kWantWrite) {
+            item.second.tls_want_write = true;
+            continue;
+          }
+          if (result == TlsIoResult::kWantRead) continue;
+          if (result != TlsIoResult::kOk) {
+            closed.push_back(item.first);
+            continue;
+          }
+          count = static_cast<int>(read);
+        } else {
+          count = recv(item.first, input, sizeof(input), 0);
+        }
         if (count <= 0) {
           closed.push_back(item.first);
           continue;
@@ -124,16 +182,52 @@ struct TcpServer::Impl {
                 if (protocol::ProtocolCodec::EncodeResponse(response, &frame))
                   connection->Send(std::move(frame));
               }))
-            closed.push_back(item.first);
+            {
+              protocol::Response response;
+              response.status = protocol::Status::kResourceExhausted;
+              response.request_id = request.request_id;
+              std::string frame;
+              if (!protocol::ProtocolCodec::EncodeResponse(response, &frame) ||
+                  !item.second.connection->Send(std::move(frame)))
+                closed.push_back(item.first);
+            }
         }
       }
       if (FD_ISSET(item.first, &writes)) {
         const std::string_view output = item.second.connection->Writable();
-        const int count = send(item.first, output.data(), static_cast<int>(output.size()), 0);
-        if (count > 0)
+        if (output.empty()) {
+          item.second.tls_want_write = false;
+          continue;
+        }
+        int count = 0;
+        if (item.second.tls_session != nullptr) {
+          std::size_t written = 0;
+          std::string error;
+          const auto result =
+              tls_context->Write(item.second.tls_session, output.data(), output.size(), &written,
+                                  &error);
+          if (result == TlsIoResult::kWantRead) {
+            item.second.tls_want_write = false;
+            continue;
+          }
+          if (result == TlsIoResult::kWantWrite) {
+            item.second.tls_want_write = true;
+            continue;
+          }
+          if (result != TlsIoResult::kOk) {
+            closed.push_back(item.first);
+            continue;
+          }
+          count = static_cast<int>(written);
+        } else {
+          count = send(item.first, output.data(), static_cast<int>(output.size()), 0);
+        }
+        if (count > 0) {
           item.second.connection->ConsumeWritten(static_cast<std::size_t>(count));
-        else if (count == 0 || WSAGetLastError() != WSAEWOULDBLOCK)
+          item.second.tls_want_write = false;
+        } else {
           closed.push_back(item.first);
+        }
       }
     }
     for (SOCKET socket : closed)
@@ -143,6 +237,9 @@ struct TcpServer::Impl {
   struct Client {
     std::shared_ptr<core::MemoryPool> pool;
     std::shared_ptr<TcpConnection> connection;
+    TlsHandle tls_session = nullptr;
+    bool tls_ready = false;
+    bool tls_want_write = false;
   };
   struct SubReactor {
     explicit SubReactor(std::size_t capacity) : loop(capacity) {}
@@ -163,6 +260,7 @@ struct TcpServer::Impl {
     const auto it = sub->clients.find(fd);
     if (it == sub->clients.end()) return;
     sub->loop.RemoveFd(fd);
+    if (it->second.tls_session != nullptr) tls_context->CloseSession(it->second.tls_session);
     close(fd);
     sub->clients.erase(fd);
   }
@@ -173,10 +271,48 @@ struct TcpServer::Impl {
       CloseClient(sub, fd);
       return;
     }
+    if (!it->second.tls_ready) {
+      std::string error;
+      const auto result = tls_context->Handshake(it->second.tls_session, &error);
+      if (result == TlsIoResult::kOk) {
+        it->second.tls_ready = true;
+        it->second.tls_want_write = false;
+      } else if (result == TlsIoResult::kWantWrite) {
+        it->second.tls_want_write = true;
+      } else if (result == TlsIoResult::kWantRead) {
+        it->second.tls_want_write = false;
+      } else {
+        CloseClient(sub, fd);
+        return;
+      }
+      if (!it->second.tls_ready) {
+        sub->loop.ModifyFd(fd, EPOLLIN | EPOLLET | EPOLLRDHUP |
+                                   (it->second.tls_want_write ? EPOLLOUT : 0));
+        return;
+      }
+    }
     if ((events & EPOLLIN) != 0) {
       char buffer[64 * 1024];
       for (;;) {
-        const ssize_t count = recv(fd, buffer, sizeof(buffer), 0);
+        ssize_t count = 0;
+        if (it->second.tls_session != nullptr) {
+          std::size_t read = 0;
+          std::string error;
+          const auto result =
+              tls_context->Read(it->second.tls_session, buffer, sizeof(buffer), &read, &error);
+          if (result == TlsIoResult::kWantWrite) {
+            it->second.tls_want_write = true;
+            break;
+          }
+          if (result == TlsIoResult::kWantRead) break;
+          if (result != TlsIoResult::kOk) {
+            CloseClient(sub, fd);
+            return;
+          }
+          count = static_cast<ssize_t>(read);
+        } else {
+          count = recv(fd, buffer, sizeof(buffer), 0);
+        }
         if (count > 0) {
           std::vector<protocol::Request> requests;
           std::string error;
@@ -201,8 +337,15 @@ struct TcpServer::Impl {
                     });
                   }
                 })) {
-              CloseClient(sub, fd);
-              return;
+              protocol::Response response;
+              response.status = protocol::Status::kResourceExhausted;
+              response.request_id = request.request_id;
+              std::string frame;
+              if (!protocol::ProtocolCodec::EncodeResponse(response, &frame) ||
+                  !connection->Send(std::move(frame))) {
+                CloseClient(sub, fd);
+                return;
+              }
             }
           }
           continue;
@@ -217,9 +360,32 @@ struct TcpServer::Impl {
     if ((events & EPOLLOUT) != 0) {
       while (!it->second.connection->Writable().empty()) {
         const auto output = it->second.connection->Writable();
-        const ssize_t count = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
+        ssize_t count = 0;
+        if (it->second.tls_session != nullptr) {
+          std::size_t written = 0;
+          std::string error;
+          const auto result =
+              tls_context->Write(it->second.tls_session, output.data(), output.size(), &written,
+                                 &error);
+          if (result == TlsIoResult::kWantRead) {
+            it->second.tls_want_write = false;
+            break;
+          }
+          if (result == TlsIoResult::kWantWrite) {
+            it->second.tls_want_write = true;
+            break;
+          }
+          if (result != TlsIoResult::kOk) {
+            CloseClient(sub, fd);
+            return;
+          }
+          count = static_cast<ssize_t>(written);
+        } else {
+          count = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
+        }
         if (count > 0) {
           it->second.connection->ConsumeWritten(static_cast<std::size_t>(count));
+          it->second.tls_want_write = false;
           continue;
         }
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
@@ -228,13 +394,26 @@ struct TcpServer::Impl {
       }
     }
     sub->loop.ModifyFd(fd, EPOLLIN | EPOLLET | EPOLLRDHUP |
-                               (it->second.connection->Writable().empty() ? 0 : EPOLLOUT));
+                               (it->second.tls_want_write ||
+                                        !it->second.connection->Writable().empty()
+                                    ? EPOLLOUT
+                                    : 0));
   }
   void AddClient(SubReactor* sub, int fd) {
-    auto pool = std::make_shared<core::MemoryPool>(128 * 1024);
+    auto pool = std::make_shared<core::MemoryPool>(512 * 1024);
     Client client{pool, std::make_shared<TcpConnection>(next_id++, &sub->loop, pool,
                                                         kConnectionReadBufferBytes,
                                                         kConnectionWriteBufferBytes)};
+    if (tls_options.enabled) {
+      std::string error;
+      client.tls_session = tls_context->NewSession(fd, true, &error);
+      if (client.tls_session == nullptr) {
+        close(fd);
+        return;
+      }
+    } else {
+      client.tls_ready = true;
+    }
     const auto inserted = sub->clients.emplace(fd, std::move(client));
     if (!inserted.second) {
       close(fd);
@@ -275,12 +454,14 @@ struct TcpServer::Impl {
 #endif
 };
 
-TcpServer::TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler)
-    : impl_(std::make_unique<Impl>(port, worker_count, std::move(handler))) {}
+TcpServer::TcpServer(std::uint16_t port, std::size_t worker_count, RequestHandler handler,
+                     TlsOptions tls_options)
+    : impl_(std::make_unique<Impl>(port, worker_count, std::move(handler),
+                                   std::move(tls_options))) {}
 TcpServer::TcpServer(std::string bind_address, std::uint16_t port, std::size_t worker_count,
-                     RequestHandler handler)
+                     RequestHandler handler, TlsOptions tls_options)
     : impl_(std::make_unique<Impl>(std::move(bind_address), port, worker_count,
-                                   std::move(handler))) {}
+                                   std::move(handler), std::move(tls_options))) {}
 TcpServer::~TcpServer() {
   Stop();
 }
@@ -288,6 +469,14 @@ TcpServer::~TcpServer() {
 bool TcpServer::Start() {
 #ifdef _WIN32
   if (!impl_->handler || impl_->started.exchange(true)) return false;
+  if (impl_->tls_options.enabled) {
+    std::string error;
+    impl_->tls_context = TlsSessionContext::CreateServer(impl_->tls_options, &error);
+    if (!impl_->tls_context) {
+      impl_->started.store(false);
+      return false;
+    }
+  }
   WSADATA data{};
   if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return false;
   impl_->listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -315,6 +504,14 @@ bool TcpServer::Start() {
   return impl_->loop.Start();
 #else
   if (!impl_->handler || impl_->started.exchange(true)) return false;
+  if (impl_->tls_options.enabled) {
+    std::string error;
+    impl_->tls_context = TlsSessionContext::CreateServer(impl_->tls_options, &error);
+    if (!impl_->tls_context) {
+      impl_->started.store(false);
+      return false;
+    }
+  }
   impl_->listener = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
   if (impl_->listener < 0) {
     impl_->started.store(false);
@@ -362,7 +559,11 @@ void TcpServer::Stop() {
   if (!impl_ || !impl_->started.exchange(false)) return;
   impl_->workers.Shutdown();
   impl_->loop.Stop();
-  for (const auto& item : impl_->clients) closesocket(item.first);
+  for (const auto& item : impl_->clients) {
+    if (item.second.tls_session != nullptr)
+      impl_->tls_context->CloseSession(item.second.tls_session);
+    closesocket(item.first);
+  }
   impl_->clients.clear();
   if (impl_->listener != INVALID_SOCKET) closesocket(impl_->listener);
   impl_->listener = INVALID_SOCKET;
@@ -373,7 +574,11 @@ void TcpServer::Stop() {
   for (auto& sub : impl_->subs) sub->loop.Stop();
   impl_->workers.Shutdown();
   for (auto& sub : impl_->subs)
-    for (const auto& client : sub->clients) close(client.first);
+    for (const auto& client : sub->clients) {
+      if (client.second.tls_session != nullptr)
+        impl_->tls_context->CloseSession(client.second.tls_session);
+      close(client.first);
+    }
   for (auto& sub : impl_->subs) sub->clients.clear();
   if (impl_->listener >= 0) close(impl_->listener);
   impl_->listener = -1;

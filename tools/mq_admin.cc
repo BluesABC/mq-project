@@ -12,10 +12,12 @@ struct Options {
   std::string host = "127.0.0.1";
   std::uint16_t port = 9092;
   std::uint32_t timeout_ms = 5000;
+  std::string auth_token;
 };
 
 void PrintUsage() {
-  std::cout << "usage: mq_admin metrics|topics [--host HOST] [--port PORT] [--timeout-ms MS]\n";
+  std::cout << "usage: mq_admin metrics|topics [--host HOST] [--port PORT] [--timeout-ms MS]"
+               " [--auth-token TOKEN]\n";
 }
 
 bool ParseNumber(const std::string& text, std::uint64_t* value) {
@@ -34,10 +36,14 @@ bool Parse(int argc, char** argv, Options* options) {
   options->command = argv[1];
   for (int index = 2; index < argc; ++index) {
     const std::string name = argv[index];
-    if ((name == "--host" || name == "--port" || name == "--timeout-ms") && index + 1 < argc) {
+    if ((name == "--host" || name == "--port" || name == "--timeout-ms" ||
+         name == "--auth-token") &&
+        index + 1 < argc) {
       const std::string value = argv[++index];
       if (name == "--host")
         options->host = value;
+      else if (name == "--auth-token")
+        options->auth_token = value;
       else {
         std::uint64_t number = 0;
         if (!ParseNumber(value, &number) || (name == "--port" && (number == 0 || number > 65535)) ||
@@ -66,6 +72,7 @@ int main(int argc, char** argv) {
 
   mq::client::MqProducer client;
   client.setTimeoutMs(options.timeout_ms);
+  client.setAuthToken(options.auth_token);
   if (!client.connect(options.host, options.port)) {
     std::cerr << "connect failed: " << client.lastError() << '\n';
     return 1;

@@ -86,11 +86,23 @@ void SetTimeout(Socket socket, std::uint32_t timeout_ms) {
 }
 }  // namespace
 
-ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::uint32_t timeout_ms)
-    : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms == 0 ? 1000 : timeout_ms) {}
+ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::uint32_t timeout_ms,
+                                     std::string auth_token)
+    : host_(std::move(host)),
+      port_(port),
+      timeout_ms_(timeout_ms == 0 ? 1000 : timeout_ms),
+      auth_token_(std::move(auth_token)) {}
 
 bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std::string payload,
                              std::string* response_payload, bool term_payload) {
+  if (auth_token_.empty() || auth_token_.size() > UINT16_MAX) {
+    error_ = "replication authentication token is not configured";
+    return false;
+  }
+  std::string authenticated_payload;
+  Put16(&authenticated_payload, static_cast<std::uint16_t>(auth_token_.size()));
+  authenticated_payload.append(auth_token_);
+  authenticated_payload.append(std::move(payload));
   // 复制请求使用短连接，故障时可以独立重试且不会把失效连接带入协调状态。
 #ifdef _WIN32
   static bool initialized = false;
@@ -132,9 +144,10 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
   request.request_id = request_id_++;
   request.flags = protocol::kFlagReplication | (term_payload ? protocol::kFlagReplicationTerm : 0);
   request.topic = topic;
-  request.payload = std::move(payload);
+  request.payload = std::move(authenticated_payload);
   std::string frame;
   protocol::Response response;
+  const auto request_id = request.request_id;
   bool okay = protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAll(socket, frame);
   char header[18]{};
   if (okay && ReceiveAll(socket, header, sizeof(header))) {
@@ -143,7 +156,8 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
       std::string full(header, sizeof(header));
       full.resize(18 + payload_size);
       okay = ReceiveAll(socket, full.data() + 18, payload_size) &&
-             protocol::ProtocolCodec::DecodeResponse(full, &response, &error_);
+             protocol::ProtocolCodec::DecodeResponse(full, &response, &error_) &&
+             response.request_id == request_id;
     } else
       okay = false;
   } else
@@ -179,6 +193,10 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
   std::size_t position = 4;
   const auto count = Get32(response, 0);
   messages->clear();
+  if (count > protocol::kMaxPayloadBytes / 18) {
+    error_ = "invalid replica fetch response count";
+    return false;
+  }
   messages->reserve(count);
   for (std::uint32_t index = 0; index < count; ++index) {
     if (position + 18 > response.size()) {
@@ -208,14 +226,12 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
 bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition,
                                const std::vector<core::Message>& messages, std::uint64_t term,
                                std::uint64_t commit_index, const std::string& leader_id) {
-  if (messages.empty()) return false;
+  if (messages.empty() || leader_id.empty() || leader_id.size() > UINT16_MAX) return false;
   std::string payload;
-  if (term != 0) {
-    Put64(&payload, term);
-    Put64(&payload, commit_index);
-    Put16(&payload, static_cast<std::uint16_t>(leader_id.size()));
-    payload.append(leader_id);
-  }
+  Put64(&payload, term);
+  Put64(&payload, commit_index);
+  Put16(&payload, static_cast<std::uint16_t>(leader_id.size()));
+  payload.append(leader_id);
   Put32(&payload, partition);
   Put32(&payload, static_cast<std::uint32_t>(messages.size()));
   for (const auto& message : messages) {
@@ -227,29 +243,38 @@ bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition
     payload.append(message.value);
   }
   return Call(static_cast<std::uint8_t>(protocol::Command::kReplicaAppend), topic,
-              std::move(payload), nullptr, term != 0);
+              std::move(payload), nullptr, true);
 }
 
-bool ReplicationClient::Heartbeat(const std::string& node_id, std::uint64_t replicated_offset,
+bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partition,
+                                  const std::string& node_id, std::uint64_t replicated_offset,
                                   std::uint64_t term, std::uint64_t commit_index) {
+  if (node_id.empty() || node_id.size() > UINT16_MAX) {
+    error_ = "invalid replication node id";
+    return false;
+  }
   std::string payload;
   Put16(&payload, static_cast<std::uint16_t>(node_id.size()));
   payload.append(node_id);
+  Put32(&payload, partition);
   Put64(&payload, replicated_offset);
   if (term != 0) {
     Put64(&payload, term);
     Put64(&payload, commit_index);
   }
-  return Call(static_cast<std::uint8_t>(protocol::Command::kHeartbeat), node_id, std::move(payload),
+  return Call(static_cast<std::uint8_t>(protocol::Command::kHeartbeat), topic, std::move(payload),
               nullptr, term != 0);
 }
 
-bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id, bool* granted) {
+bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id, bool* granted,
+                             std::uint64_t last_log_index, std::uint64_t last_log_term) {
   if (granted == nullptr || candidate_id.empty() || candidate_id.size() > UINT16_MAX) return false;
   std::string payload;
   Put64(&payload, term);
   Put16(&payload, static_cast<std::uint16_t>(candidate_id.size()));
   payload.append(candidate_id);
+  Put64(&payload, last_log_index);
+  Put64(&payload, last_log_term);
   std::string response;
   if (!Call(static_cast<std::uint8_t>(protocol::Command::kReplicaVote), candidate_id,
             std::move(payload), &response))
