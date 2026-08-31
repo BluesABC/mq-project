@@ -39,20 +39,30 @@ if(MQ_BUILD_FUZZERS)
     message(FATAL_ERROR "MQ_BUILD_FUZZERS requires a Clang compiler with libFuzzer support")
   endif()
   if(UNIX AND NOT APPLE)
-    execute_process(
-      COMMAND ${CMAKE_CXX_COMPILER} -print-resource-dir
-      OUTPUT_VARIABLE MQ_CLANG_RESOURCE_DIR
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      ERROR_QUIET)
-    file(GLOB MQ_FUZZER_RUNTIME_FILES
-         "${MQ_CLANG_RESOURCE_DIR}/lib/libclang_rt.fuzzer.a"
-         "${MQ_CLANG_RESOURCE_DIR}/lib/*/libclang_rt.fuzzer.a")
-    if(NOT MQ_FUZZER_RUNTIME_FILES)
+    # 不直接猜测 compiler-rt 的文件名或目录：不同发行版使用
+    # lib/linux/libclang_rt.*-x86_64.a 或 target-triple 子目录。
+    # 用与目标完全一致的参数做一次编译+链接探测，避免“已安装但误判缺失”。
+    include(CheckCXXSourceCompiles)
+    set(MQ_FUZZER_REQUIRED_FLAGS "-fsanitize=fuzzer,address,undefined")
+    set(CMAKE_REQUIRED_FLAGS "${MQ_FUZZER_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_LINK_OPTIONS -fsanitize=fuzzer,address,undefined)
+    check_cxx_source_compiles(
+      "extern \"C\" int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }"
+      MQ_FUZZER_RUNTIME_LINKS)
+    unset(CMAKE_REQUIRED_FLAGS)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    if(NOT MQ_FUZZER_RUNTIME_LINKS)
       string(REGEX MATCH "^[0-9]+" MQ_CLANG_MAJOR "${CMAKE_CXX_COMPILER_VERSION}")
+      execute_process(
+        COMMAND ${CMAKE_CXX_COMPILER} -print-resource-dir
+        OUTPUT_VARIABLE MQ_CLANG_RESOURCE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
       message(FATAL_ERROR
-              "Clang libFuzzer runtime is missing. Install libclang-rt-${MQ_CLANG_MAJOR}-dev "
-              "(and use the matching clang-${MQ_CLANG_MAJOR}/clang++-${MQ_CLANG_MAJOR}), "
-              "then remove the old build-fuzzer directory and configure again.")
+              "Clang libFuzzer/compiler-rt link test failed. Install the matching "
+              "libclang-rt-${MQ_CLANG_MAJOR}-dev package and use clang-${MQ_CLANG_MAJOR}; "
+              "compiler resource dir: ${MQ_CLANG_RESOURCE_DIR}. "
+              "Remove the old build-fuzzer directory and configure again.")
     endif()
   endif()
   add_executable(mq_protocol_libfuzzer test/fuzz/protocol_fuzz.cc)

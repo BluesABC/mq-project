@@ -46,7 +46,7 @@ cmake --build build-fuzzer --parallel
 ctest --test-dir build-fuzzer --output-on-failure
 ```
 
-如果使用 Clang 21，必须安装 `libclang-rt-21-dev`；若发行版仓库没有该包，应改用仓库提供的 Clang 18 工具链，不能混用 Clang 21 编译器和 Clang 18 的运行库。
+配置阶段会用当前编译器实际执行 `-fsanitize=fuzzer,address,undefined` 的编译和链接探测，不依赖发行版具体的 runtime 文件名或目录布局。如果使用 Clang 21，必须安装 `libclang-rt-21-dev`；若发行版仓库没有该包，应改用仓库提供的 Clang 18 工具链，不能混用 Clang 21 编译器和 Clang 18 的运行库。CI 还会打印 resource dir 和 runtime 查询结果，便于定位工具链安装问题。
 
 ### 3.3 并发原语 `buffer_test`
 - [x] MPMC 环形队列满/空行为

@@ -74,6 +74,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-18 llvm-18 libclang-rt-18-dev
+      - name: Verify Clang runtime
+        run: |
+          set -euxo pipefail
+          clang++-18 --version
+          clang++-18 -print-resource-dir
+          clang++-18 -print-file-name=libclang_rt.fuzzer.a
+          clang++-18 -print-file-name=libclang_rt.fuzzer-x86_64.a
+          clang++-18 -print-file-name=libclang_rt.asan-x86_64.a
+          printf '%s\n' \
+            'extern "C" int LLVMFuzzerTestOneInput(const unsigned char*, unsigned long) { return 0; }' \
+            > /tmp/mq-fuzzer-probe.cc
+          clang++-18 -fsanitize=fuzzer,address,undefined \
+            /tmp/mq-fuzzer-probe.cc -o /tmp/mq-fuzzer-probe
       - name: Configure
         env:
           CC: clang-18
