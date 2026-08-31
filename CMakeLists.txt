@@ -38,6 +38,23 @@ if(MQ_BUILD_FUZZERS)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "MQ_BUILD_FUZZERS requires a Clang compiler with libFuzzer support")
   endif()
+  if(UNIX AND NOT APPLE)
+    execute_process(
+      COMMAND ${CMAKE_CXX_COMPILER} -print-resource-dir
+      OUTPUT_VARIABLE MQ_CLANG_RESOURCE_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    file(GLOB MQ_FUZZER_RUNTIME_FILES
+         "${MQ_CLANG_RESOURCE_DIR}/lib/libclang_rt.fuzzer.a"
+         "${MQ_CLANG_RESOURCE_DIR}/lib/*/libclang_rt.fuzzer.a")
+    if(NOT MQ_FUZZER_RUNTIME_FILES)
+      string(REGEX MATCH "^[0-9]+" MQ_CLANG_MAJOR "${CMAKE_CXX_COMPILER_VERSION}")
+      message(FATAL_ERROR
+              "Clang libFuzzer runtime is missing. Install libclang-rt-${MQ_CLANG_MAJOR}-dev "
+              "(and use the matching clang-${MQ_CLANG_MAJOR}/clang++-${MQ_CLANG_MAJOR}), "
+              "then remove the old build-fuzzer directory and configure again.")
+    endif()
+  endif()
   add_executable(mq_protocol_libfuzzer test/fuzz/protocol_fuzz.cc)
   target_link_libraries(mq_protocol_libfuzzer PRIVATE mq_protocol)
   target_include_directories(mq_protocol_libfuzzer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

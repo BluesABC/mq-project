@@ -63,6 +63,10 @@
 - 修复 VM16 Linux Release 下 `mq_core_tests` 因空协议帧触发 `std::out_of_range` 的问题。
 
 ### 项目状态
+
+### Fuzzer 构建依赖修正
+- CI 显式安装与 Clang 18 匹配的 `libclang-rt-18-dev`，避免 libFuzzer/ASan 静态运行库依赖发行版预装状态。
+- CMake 在启用 `MQ_BUILD_FUZZERS` 时检查 compiler-rt，并在缺少匹配运行库时提示对应安装包和清理构建目录。
 - P1 基础链路、P2 复制与故障切换已落地；P3 已开始接入可观测性基础能力。
 
 ### P1 Topic 元数据持久化

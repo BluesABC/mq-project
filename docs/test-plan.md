@@ -34,6 +34,20 @@ ctest --test-dir build --output-on-failure
 - [x] 随机受限输入、超长长度字段和随机分片回归（`mq_protocol_fuzz_tests`）
 - [x] 提供并实际运行 Clang libFuzzer 覆盖引导式入口（`MQ_BUILD_FUZZERS=ON`，2000 次变异）
 
+Clang Fuzzer 构建要求安装与编译器主版本匹配的 compiler-rt 开发包。例如 Ubuntu 24.04 使用 Clang 18：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y clang-18 llvm-18 libclang-rt-18-dev
+rm -rf build-fuzzer
+CC=clang-18 CXX=clang++-18 cmake -S . -B build-fuzzer \
+  -DMQ_BUILD_TESTS=ON -DMQ_BUILD_TOOLS=OFF -DMQ_BUILD_FUZZERS=ON
+cmake --build build-fuzzer --parallel
+ctest --test-dir build-fuzzer --output-on-failure
+```
+
+如果使用 Clang 21，必须安装 `libclang-rt-21-dev`；若发行版仓库没有该包，应改用仓库提供的 Clang 18 工具链，不能混用 Clang 21 编译器和 Clang 18 的运行库。
+
 ### 3.3 并发原语 `buffer_test`
 - [x] MPMC 环形队列满/空行为
 - [x] MPMC 多生产者多消费者一致性

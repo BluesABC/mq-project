@@ -73,7 +73,7 @@ jobs:
       - name: Install Clang and LLVM
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 llvm-18
+          sudo apt-get install -y clang-18 llvm-18 libclang-rt-18-dev
       - name: Configure
         env:
           CC: clang-18
