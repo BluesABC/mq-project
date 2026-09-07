@@ -44,7 +44,7 @@ class MpmcQueue {
    * @param capacity 期望的队列容量，最小值为 2
    */
   explicit MpmcQueue(std::size_t capacity)
-      : capacity_(NormalizeCapacity(capacity)), mask_(capacity_ - 1), cells_(new Cell[capacity]) {
+      : capacity_(NormalizeCapacity(capacity)), mask_(capacity_ - 1), cells_(new Cell[capacity_]) {
     // 初始化每个槽位的序号为其索引值
     // 这保证了初始状态下每个槽位都是"可写"的
     for (std::size_t index = 0; index < capacity_; ++index) {
