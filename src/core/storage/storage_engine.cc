@@ -832,34 +832,28 @@ bool StorageEngine::NextOffset(const std::string& topic, std::uint32_t partition
   *offset = target->next_offset;
   return true;
 }
-
 /**
  * @brief 强制刷盘，将所有未持久化的数据写入磁盘
  *
- * 遍历所有分区和段文件，执行 fs
-
-
-    
-
-2 of  3 
-233  9
-
-
-.:.制 System.md全域
-/**
-->同步  bSegments(part >. fs// stdstd::lock_guard<std::mutex> lock(mutex_);
+ * 遍历所有分区和段文件，执行 fsync。
+ *
+ * @param error 可选的错误信息输出参数
+ * @return true 刷盘成功；false IO 错误
+ */
+bool StorageEngine::Flush(std::string* error) {
+  std::lock_guard<std::mutex> lock(mutex_);
 
   for (const auto& partition : partitions_)
     for (const auto& segment : partition->segments) {
-           segment->file.flush();
-           if (!segment->file || !SyncPath(segment->path) ||
-                   (std::filesystem::exists(segment->index_path) && !SyncPath(segment->index_path))) {
-               if (error) *error = "WAL flush failed";
+      segment->file.flush();
+      if (!segment->file || !SyncPath(segment->path) ||
+          (std::filesystem::exists(segment->index_path) && !SyncPath(segment->index_path))) {
+        if (error) *error = "WAL flush failed";
         return false;
       }
     }
 
-   return true;
+  return true;
 }
 
 /**

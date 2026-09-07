@@ -121,7 +121,7 @@ std::vector<TopicMetadata> QueueManager::ListTopics() const {
   topics.reserve(topics_.size());
 
   // 复制所有 Topic 元数据
-  for (const auto& item : topics_.topics_) topics.push_back(item.second);
+  for (const auto& item : topics_) topics.push_back(item.second);
 
   // 按名称排序，保证返回结果的确定性，便于客户端展示和比较
   std::sort(

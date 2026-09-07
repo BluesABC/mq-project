@@ -165,7 +165,7 @@ class MqProducer {
    * @param results 可选的输出参数，成功时写入每条消息的生产结果
    * @return true 所有消息生产成功；false 部分或全部失败
    */
-  bool produceBatch(const std::string& topic, std::vector<ProducerMessage> messages,
+  bool produceBatch(const std::string& topic, const std::vector<ProducerMessage>& messages,
                     AckMode ack = AckMode::kOne, std::vector<ProduceResult>* results = nullptr);
 
   /**

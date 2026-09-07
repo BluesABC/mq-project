@@ -49,7 +49,7 @@ void ReplicationCoordinator::PersistLocked() const {
   if (state_path_.empty()) return;
   std::error_code error;
   std::filesystem::create_directories(state_path_.parent_path(), error);
-  const auto temporary = state_path_.wstring() + L".tmp";
+  const auto temporary = state_path_.string() + ".tmp";
   std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
   const std::uint32_t magic = 0x31544652u;
   const auto voted_size = static_cast<std::uint32_t>(voted_for_.size());
