@@ -86,6 +86,7 @@ Broker::Broker(std::filesystem::path data_dir)
     : Broker(std::move(data_dir), core::StorageConfig{}) {}
 Broker::Broker(std::filesystem::path data_dir, core::StorageConfig storage_config)
     : storage_(data_dir, storage_config),
+      data_dir_(data_dir),
       metadata_store_(data_dir / "metadata" / "topics.meta"),
       offset_store_(data_dir / "metadata" / "consumer_offsets.meta"),
       storage_config_(storage_config),
@@ -104,7 +105,8 @@ void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPe
   replication_auth_token_ = std::move(auth_token);
   replication_configured_ = true;
   replication_coordinator_ = std::make_unique<ReplicationCoordinator>(
-      node_id_, follower ? ReplicaRole::kFollower : ReplicaRole::kLeader);
+      node_id_, follower ? ReplicaRole::kFollower : ReplicaRole::kLeader,
+      std::chrono::seconds(10), data_dir_ / "metadata");
   for (const auto& peer : replication_peers_)
     replication_coordinator_->RegisterReplica(peer.node_id);
 }
@@ -131,8 +133,11 @@ bool Broker::AuthorizeClientRequest(const protocol::Request& request) const {
              TopicAllowed(client_authorization_.produce_topics, request.topic);
     case protocol::Command::kFetch:
     case protocol::Command::kCommitOffset:
+    case protocol::Command::kJoinGroup:
+    case protocol::Command::kSyncGroup:
+    case protocol::Command::kOffsetFetch:
       return client_authorization_.allow_consume &&
-             TopicAllowed(client_authorization_.consume_topics, request.topic);
+             (request.topic.empty() || TopicAllowed(client_authorization_.consume_topics, request.topic));
     case protocol::Command::kHeartbeat:
       return true;
     default:
@@ -248,40 +253,76 @@ void Broker::ReplicationLoop() {
           last_election = now;
           election_timeout = NextElectionTimeout(&election_generator);
         } else if (now - last_election >= election_timeout) {
-          const auto election = replication_coordinator_->BeginElection();
-          std::size_t votes = 1;
+          const auto pre_vote = replication_coordinator_->BeginPreVote();
+          bool pre_vote_majority =
+              replication_coordinator_->ObservePreVote(pre_vote.term, node_id_, true);
           for (const auto& peer : replication_peers_) {
             if (peer.leader) continue;
             ReplicationClient client(peer.host, peer.port, 1000, replication_auth_token_);
             bool granted = false;
-            if (client.Vote(election.term, node_id_, &granted,
+            if (client.PreVote(pre_vote.term, node_id_, &granted,
                             replication_coordinator_->lastLogIndex(),
                             replication_coordinator_->lastLogTerm()) &&
                 granted) {
-              ++votes;
-              replication_coordinator_->ObserveVote(election.term, peer.node_id, true);
+              pre_vote_majority = replication_coordinator_->ObservePreVote(
+                  pre_vote.term, peer.node_id, true) || pre_vote_majority;
             }
           }
-          if (votes >= (replication_peers_.size() + 2) / 2 + 1)
+          if (pre_vote_majority) {
+            const auto election = replication_coordinator_->BeginElection();
             replication_coordinator_->ObserveVote(election.term, node_id_, true);
+            for (const auto& peer : replication_peers_) {
+              if (peer.leader) continue;
+              ReplicationClient client(peer.host, peer.port, 1000, replication_auth_token_);
+              bool granted = false;
+              if (client.Vote(election.term, node_id_, &granted,
+                              replication_coordinator_->lastLogIndex(),
+                              replication_coordinator_->lastLogTerm()) &&
+                  granted)
+                replication_coordinator_->ObserveVote(election.term, peer.node_id, true);
+            }
+          }
           last_election = now;
           election_timeout = NextElectionTimeout(&election_generator);
         }
       } else {
+        std::size_t heartbeat_responses = 1;
         for (const auto& peer : replication_peers_) {
           ReplicationClient client(peer.host, peer.port, 1000, replication_auth_token_);
           for (const auto& topic : queues_.ListTopics()) {
             for (std::uint32_t partition = 0; partition < topic.partition_count; ++partition) {
               const auto key = PartitionKey(topic.name, partition);
-              if (client.Heartbeat(topic.name, partition, node_id_,
-                                   replication_coordinator_->commitIndex(key),
-                                   replication_coordinator_->term(),
-                                   replication_coordinator_->commitIndex(key)))
+              const bool heartbeat_ok = client.Heartbeat(
+                  topic.name, partition, node_id_, replication_coordinator_->commitIndex(key),
+                  replication_coordinator_->term(), replication_coordinator_->commitIndex(key));
+              if (heartbeat_ok) {
                 replication_coordinator_->ObserveHeartbeat(key, peer.node_id,
                                                            replication_coordinator_->commitIndex(key));
+                ++heartbeat_responses;
+                std::uint64_t follower_offset = 0;
+                {
+                  std::lock_guard lock(replication_mutex_);
+                  follower_offset = replication_offsets_[peer.node_id + ":" + key];
+                }
+                std::vector<core::Message> pending;
+                std::string read_error;
+                if (storage_.Read(topic.name, partition, follower_offset, 1024 * 1024, &pending,
+                                  &read_error) &&
+                    !pending.empty()) {
+                  const auto prev_index = pending.front().offset == 0 ? 0 : pending.front().offset - 1;
+                  if (client.Append(topic.name, partition, pending, replication_coordinator_->term(),
+                                    replication_coordinator_->commitIndex(key), node_id_, prev_index,
+                                    replication_coordinator_->lastLogTerm())) {
+                    std::lock_guard lock(replication_mutex_);
+                    replication_offsets_[peer.node_id + ":" + key] = pending.back().offset + 1;
+                  }
+                }
+              }
             }
           }
         }
+        replication_coordinator_->ObserveHeartbeatRound(
+            heartbeat_responses >= (replication_peers_.size() + 2) / 2 + 1);
       }
       std::unique_lock lock(replication_mutex_);
       replication_cv_.wait_for(lock, std::chrono::milliseconds(250), [this] {
@@ -302,6 +343,8 @@ bool Broker::Open(std::string* error) {
   std::vector<core::TopicMetadata> topics;
   if (!metadata_store_.Load(&topics, error) || !queues_.ReplaceTopics(std::move(topics), error))
     return false;
+  for (const auto& topic : queues_.ListTopics())
+    consumer_groups_.SetPartitions(topic.name, topic.partition_count);
   if (!offset_store_.Load(&consumer_offsets_, error)) return false;
   opened_ = true;
   core::Logger::Instance().Log(core::LogLevel::kInfo, "broker storage initialized");
@@ -381,6 +424,15 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
     case protocol::Command::kCommitOffset:
       response = HandleCommitOffset(dispatch_request);
       break;
+    case protocol::Command::kJoinGroup:
+      response = HandleJoinGroup(dispatch_request);
+      break;
+    case protocol::Command::kSyncGroup:
+      response = HandleSyncGroup(dispatch_request);
+      break;
+    case protocol::Command::kOffsetFetch:
+      response = HandleOffsetFetch(dispatch_request);
+      break;
     case protocol::Command::kHeartbeat:
       response = HandleHeartbeat(dispatch_request);
       break;
@@ -417,7 +469,8 @@ bool Broker::ValidateReplicationRequest(const protocol::Request& request,
     return false;
   if ((request.flags & protocol::kFlagReplicationTerm) != 0 &&
       request.command != protocol::Command::kHeartbeat &&
-      request.command != protocol::Command::kReplicaAppend)
+      request.command != protocol::Command::kReplicaAppend &&
+      request.command != protocol::Command::kReplicaVote)
     return false;
   if (request.payload.size() < 2) return false;
   const auto token_size = Get16(request.payload, 0);
@@ -455,6 +508,7 @@ bool Broker::Flush(std::string* error) {
 }
 
 protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
+  consumer_groups_.Expire();
   if ((request.flags & protocol::kFlagReplication) != 0) {
     if (request.topic.empty() || request.payload.size() < 14)
       return MakeResponse(request, protocol::Status::kBadRequest);
@@ -479,10 +533,92 @@ protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
     }
     return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
   }
+  if (request.payload.size() >= 4) {
+    const auto group_size = Get16(request.payload, 0);
+    if (request.payload.size() != 4ULL + group_size) return MakeResponse(request, protocol::Status::kBadRequest);
+    const auto member_size = Get16(request.payload, 2 + group_size);
+    if (group_size == 0 || member_size == 0 || request.payload.size() != 4ULL + group_size + member_size)
+      return MakeResponse(request, protocol::Status::kBadRequest);
+    const std::string group = request.payload.substr(2, group_size);
+    const std::string member = request.payload.substr(4 + group_size, member_size);
+    if (!consumer_groups_.Heartbeat(group, member))
+      return MakeResponse(request, protocol::Status::kInvalidOffset);
+    return MakeResponse(request, protocol::Status::kOk);
+  }
   if (!request.payload.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
   std::string error;
   if (!storage_.Flush(&error)) return MakeResponse(request, protocol::Status::kStorageError);
   return MakeResponse(request, protocol::Status::kOk);
+}
+
+protocol::Response Broker::HandleJoinGroup(const protocol::Request& request) {
+  if (request.payload.size() < 6) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto group_size = Get16(request.payload, 0);
+  if (2ULL + group_size + 4 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto member_size = Get16(request.payload, 2 + group_size);
+  const auto topic_count = Get16(request.payload, 4 + group_size);
+  std::size_t position = 6 + group_size + member_size;
+  if (group_size == 0 || member_size == 0 || position > request.payload.size())
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  std::vector<std::string> topics;
+  for (std::uint16_t index = 0; index < topic_count; ++index) {
+    if (position + 2 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    const auto size = Get16(request.payload, position);
+    position += 2;
+    if (size == 0 || position + size > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+    topics.emplace_back(request.payload, position, size);
+    position += size;
+  }
+  if (position != request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto group = request.payload.substr(2, group_size);
+  const auto member = request.payload.substr(4 + group_size, member_size);
+  if (!consumer_groups_.Join(group, member, topics)) return MakeResponse(request, protocol::Status::kBadRequest);
+  std::string payload;
+  Put16(&payload, static_cast<std::uint16_t>(member.size()));
+  payload.append(member);
+  return MakeResponse(request, protocol::Status::kOk, std::move(payload));
+}
+
+protocol::Response Broker::HandleSyncGroup(const protocol::Request& request) {
+  if (request.payload.size() < 4) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto group_size = Get16(request.payload, 0);
+  if (2ULL + group_size + 2 > request.payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto member_size = Get16(request.payload, 2 + group_size);
+  if (group_size == 0 || member_size == 0 || 4ULL + group_size + member_size != request.payload.size())
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  std::vector<core::GroupAssignment> assignments;
+  if (!consumer_groups_.Sync(request.payload.substr(2, group_size),
+                             request.payload.substr(4 + group_size, member_size), &assignments))
+    return MakeResponse(request, protocol::Status::kInvalidOffset);
+  std::string payload;
+  Put32(&payload, static_cast<std::uint32_t>(assignments.size()));
+  for (const auto& assignment : assignments) {
+    Put16(&payload, static_cast<std::uint16_t>(assignment.topic.size()));
+    payload.append(assignment.topic);
+    Put32(&payload, assignment.partition);
+  }
+  return MakeResponse(request, protocol::Status::kOk, std::move(payload));
+}
+
+protocol::Response Broker::HandleOffsetFetch(const protocol::Request& request) {
+  if (request.topic.empty() || request.payload.size() < 6) return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto group_size = Get16(request.payload, 0);
+  if (group_size == 0 || request.payload.size() != 6ULL + group_size)
+    return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto partition = Get32(request.payload, 2 + group_size);
+  const auto group = request.payload.substr(2, group_size);
+  std::uint32_t resolved = 0;
+  std::string error;
+  if (!queues_.ResolvePartition(request.topic, partition, "", &resolved, &error))
+    return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
+                                                           : protocol::Status::kInvalidOffset);
+  std::lock_guard lock(topic_metadata_mutex_);
+  const auto it = std::find_if(consumer_offsets_.begin(), consumer_offsets_.end(), [&](const auto& offset) {
+    return offset.group == group && offset.topic == request.topic && offset.partition == resolved;
+  });
+  std::string payload;
+  Put64(&payload, it == consumer_offsets_.end() ? 0 : it->offset);
+  return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
 protocol::Response Broker::HandleReplicaFetch(const protocol::Request& request) {
@@ -533,16 +669,26 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
   std::size_t position = 0;
   std::uint64_t term = 0;
   std::uint64_t commit = 0;
+  std::uint64_t prev_log_index = 0;
+  std::uint64_t prev_log_term = 0;
   std::string leader_id;
   if ((request.flags & protocol::kFlagReplicationTerm) != 0) {
     if (request.payload.size() < 26) return MakeResponse(request, protocol::Status::kBadRequest);
     term = Get64(request.payload, 0);
     commit = Get64(request.payload, 8);
     const auto leader_size = Get16(request.payload, 16);
-    if (leader_size == 0 || request.payload.size() < 18ULL + leader_size + 8)
+    if (leader_size == 0 || request.payload.size() < 26ULL + leader_size)
       return MakeResponse(request, protocol::Status::kBadRequest);
     leader_id = request.payload.substr(18, leader_size);
     position = 18 + leader_size;
+    const auto candidate_count = request.payload.size() >= 38ULL + leader_size
+                                     ? Get32(request.payload, position + 20)
+                                     : 0;
+    if (candidate_count > 0 && candidate_count <= 10000) {
+      prev_log_index = Get64(request.payload, position);
+      prev_log_term = Get64(request.payload, position + 8);
+      position += 16;
+    }
   }
   if (position + 8 > request.payload.size())
     return MakeResponse(request, protocol::Status::kBadRequest);
@@ -585,6 +731,13 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
   }
   if (position != request.payload.size())
     return MakeResponse(request, protocol::Status::kBadRequest);
+  const auto partition_key = PartitionKey(request.topic, resolved_partition);
+  if ((request.flags & protocol::kFlagReplicationTerm) != 0 &&
+      !replication_coordinator_->LogMatches(partition_key, prev_log_index, prev_log_term)) {
+    std::string hint;
+    Put64(&hint, replication_coordinator_->NextLogIndex(partition_key));
+    return MakeResponse(request, protocol::Status::kInvalidOffset, std::move(hint));
+  }
   std::uint64_t expected_offset = 0;
   if (!storage_.NextOffset(request.topic, resolved_partition, &expected_offset, &error) ||
       messages.front().offset != expected_offset)
@@ -595,15 +748,14 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
       return MakeResponse(request, protocol::Status::kInvalidOffset);
   }
   if ((request.flags & protocol::kFlagReplicationTerm) != 0 &&
-      !replication_coordinator_->ObserveAppend(PartitionKey(request.topic, resolved_partition),
-                                               term, leader_id, last_offset, commit))
+      !replication_coordinator_->ObserveAppend(partition_key, term, leader_id, last_offset,
+                                               commit))
     return MakeResponse(request, protocol::Status::kStorageError);
   for (const auto& message : messages)
     if (!storage_.AppendReplica(request.topic, resolved_partition, message, &error))
       return MakeResponse(request, error == "replica offset gap" ? protocol::Status::kInvalidOffset
                                                                  : protocol::Status::kStorageError);
-  replication_coordinator_->RecordLocalOffset(PartitionKey(request.topic, resolved_partition),
-                                               last_offset);
+  replication_coordinator_->RecordLocalOffset(partition_key, last_offset);
   return MakeResponse(request, protocol::Status::kOk);
 }
 
@@ -616,9 +768,13 @@ protocol::Response Broker::HandleReplicaVote(const protocol::Request& request) {
     return MakeResponse(request, protocol::Status::kBadRequest);
   const auto last_log_index = Get64(request.payload, 10 + size);
   const auto last_log_term = Get64(request.payload, 18 + size);
-  const bool granted =
-      replication_coordinator_->RequestVote(term, request.payload.substr(10, size), last_log_index,
-                                             last_log_term);
+  const bool granted = (request.flags & protocol::kFlagReplicationTerm) != 0
+                           ? replication_coordinator_->RequestPreVote(
+                                 term, request.payload.substr(10, size), last_log_index,
+                                 last_log_term)
+                           : replication_coordinator_->RequestVote(
+                                 term, request.payload.substr(10, size), last_log_index,
+                                 last_log_term);
   std::string payload(1, granted ? '\1' : '\0');
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
@@ -664,6 +820,7 @@ protocol::Response Broker::HandleCreateTopic(const protocol::Request& request) {
   std::lock_guard<std::mutex> lock(topic_metadata_mutex_);
   std::string error;
   if (queues_.CreateTopic(request.topic, Get32(request.payload, 0), &error)) {
+    consumer_groups_.SetPartitions(request.topic, Get32(request.payload, 0));
     if (!metadata_store_.Save(queues_.ListTopics(), &error)) {
       queues_.DeleteTopic(request.topic, nullptr);
       return MakeResponse(request, protocol::Status::kStorageError);
@@ -766,6 +923,15 @@ protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
           << "# TYPE mq_commit_index gauge\n"
           << "mq_commit_index "
           << (replication_coordinator_ ? replication_coordinator_->commitIndex() : 0) << "\n"
+          << "# TYPE mq_raft_voted_for gauge\n"
+          << "mq_raft_voted_for{node=\""
+          << (replication_coordinator_ ? replication_coordinator_->votedFor() : "") << "\"} 1\n"
+          << "# TYPE mq_raft_commit_index gauge\n"
+          << "mq_raft_commit_index "
+          << (replication_coordinator_ ? replication_coordinator_->commitIndex() : 0) << "\n"
+          << "# TYPE mq_raft_last_applied gauge\n"
+          << "mq_raft_last_applied "
+          << (replication_coordinator_ ? replication_coordinator_->lastApplied() : 0) << "\n"
           << "# TYPE mq_topic_produce_quota_bytes_per_second gauge\n"
           << "mq_topic_produce_quota_bytes_per_second " << topic_quota << "\n"
           << "# TYPE mq_topic_produce_bytes_used gauge\n"
@@ -863,7 +1029,8 @@ bool Broker::Replicate(const std::string& topic, std::uint32_t partition,
     if (client.Append(topic, partition, std::vector<core::Message>{message},
                       replication_coordinator_->term(),
                       replication_coordinator_->commitIndex(PartitionKey(topic, partition)),
-                      node_id_)) {
+                      node_id_, message.offset == 0 ? 0 : message.offset - 1,
+                      replication_coordinator_->lastLogTerm())) {
       ++acknowledgements;
       replication_coordinator_->ObserveHeartbeat(PartitionKey(topic, partition), peer.node_id,
                                                  message.offset);

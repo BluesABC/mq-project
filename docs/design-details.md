@@ -299,6 +299,14 @@ Reactor 收到完整帧 ──► MPMC 任务队列 ──► Worker 池
 
 ## 5. 模块间数据流与接口约定
 
+### 5.1 Raft 复制状态
+
+协调器启动时从 `metadata/raft_state.bin` 恢复当前任期、投票节点、提交索引和已应用索引；任期变化、投票、提交或应用推进时以临时文件替换方式落盘，避免留下半写状态。AppendEntries 使用 `prev_log_index/prev_log_term` 校验日志匹配，Follower 不匹配时返回下一候选索引，Leader 据此重试。选举先发送 PreVote 探测，只有多数派同意才递增任期；Leader 连续三个心跳周期失去多数派后降级并拒绝写入。
+
+### 5.2 Consumer Group
+
+`ConsumerGroupCoordinator` 只在元数据操作路径加锁，按 group 保存成员订阅和最后心跳；超过 30 秒未心跳的成员会被移除并触发 Rebalance。Rebalance 先合并 group 内订阅 topic 的 partition，再按稳定排序的 member_id 做 round-robin，保证同一 partition 只分配给一个 active member。`SYNC_GROUP` 返回成员当前 assignment，`OFFSET_FETCH` 从 `ConsumerOffsetStore` 读取已提交位点。
+
 ```
 Client ──(帧)──▶ TCP Server ──▶ Reactor(read) ──▶ MPMC ──▶ Worker(解码)
                                                           │

@@ -1,6 +1,8 @@
 #include "mq/server/replication.h"
 
 #include <algorithm>
+#include <fstream>
+#include <system_error>
 #include <utility>
 
 namespace mq::server {
@@ -11,8 +13,60 @@ const ReplicationCoordinator::PartitionKey kLegacyPartition = "__legacy__";
 }  // namespace
 
 ReplicationCoordinator::ReplicationCoordinator(std::string node_id, ReplicaRole role,
-                                               std::chrono::milliseconds timeout)
-    : node_id_(std::move(node_id)), heartbeat_timeout_(timeout), role_(role), leader_id_(node_id_) {}
+                                               std::chrono::milliseconds timeout,
+                                               std::filesystem::path metadata_dir)
+    : node_id_(std::move(node_id)),
+      heartbeat_timeout_(timeout),
+      role_(role),
+      leader_id_(node_id_),
+      state_path_(metadata_dir.empty() ? std::filesystem::path{}
+                                       : metadata_dir / "raft_state.bin") {
+  LoadState();
+}
+
+void ReplicationCoordinator::LoadState() {
+  if (state_path_.empty()) return;
+  std::ifstream input(state_path_, std::ios::binary);
+  std::uint32_t magic = 0;
+  std::uint64_t term = 0, commit = 0, applied = 0;
+  std::uint32_t voted_size = 0;
+  if (!input.read(reinterpret_cast<char*>(&magic), sizeof(magic)) || magic != 0x31544652u ||
+      !input.read(reinterpret_cast<char*>(&term), sizeof(term)) ||
+      !input.read(reinterpret_cast<char*>(&commit), sizeof(commit)) ||
+      !input.read(reinterpret_cast<char*>(&applied), sizeof(applied)) ||
+      !input.read(reinterpret_cast<char*>(&voted_size), sizeof(voted_size)) || voted_size > 4096)
+    return;
+  std::string voted(voted_size, '\0');
+  if (voted_size != 0 && !input.read(voted.data(), voted_size)) return;
+  std::lock_guard lock(mutex_);
+  current_term_ = term;
+  commit_index_ = commit;
+  last_applied_ = applied;
+  voted_for_ = std::move(voted);
+}
+
+void ReplicationCoordinator::PersistLocked() const {
+  if (state_path_.empty()) return;
+  std::error_code error;
+  std::filesystem::create_directories(state_path_.parent_path(), error);
+  const auto temporary = state_path_.wstring() + L".tmp";
+  std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+  const std::uint32_t magic = 0x31544652u;
+  const auto voted_size = static_cast<std::uint32_t>(voted_for_.size());
+  output.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+  output.write(reinterpret_cast<const char*>(&current_term_), sizeof(current_term_));
+  output.write(reinterpret_cast<const char*>(&commit_index_), sizeof(commit_index_));
+  output.write(reinterpret_cast<const char*>(&last_applied_), sizeof(last_applied_));
+  output.write(reinterpret_cast<const char*>(&voted_size), sizeof(voted_size));
+  output.write(voted_for_.data(), voted_for_.size());
+  output.flush();
+  output.close();
+  if (output) {
+    std::filesystem::remove(state_path_, error);
+    error.clear();
+    std::filesystem::rename(temporary, state_path_, error);
+  }
+}
 
 ReplicaRole ReplicationCoordinator::role() const {
   std::lock_guard lock(mutex_);
@@ -62,6 +116,16 @@ std::uint64_t ReplicationCoordinator::commitIndex(const PartitionKey& partition)
   return it == partition_states_.end() ? 0 : it->second.commit_index;
 }
 
+std::uint64_t ReplicationCoordinator::lastApplied() const {
+  std::lock_guard lock(mutex_);
+  return last_applied_;
+}
+
+std::string ReplicationCoordinator::votedFor() const {
+  std::lock_guard lock(mutex_);
+  return voted_for_;
+}
+
 std::size_t ReplicationCoordinator::Majority() const {
   return (replicas_.size() + 1) / 2 + 1;
 }
@@ -82,6 +146,7 @@ void ReplicationCoordinator::SetLeader(std::string node_id) {
   leader_id_ = std::move(node_id);
   role_ = leader_id_ == node_id_ ? ReplicaRole::kLeader : ReplicaRole::kFollower;
   votes_.clear();
+  PersistLocked();
 }
 
 void ReplicationCoordinator::RegisterReplica(std::string node_id) {
@@ -143,11 +208,15 @@ bool ReplicationCoordinator::ObserveAppend(const PartitionKey& partition, std::u
   if (term > current_term_) {
     current_term_ = term;
     voted_for_.clear();
+    PersistLocked();
   }
   leader_id_ = leader_id;
   role_ = leader_id == node_id_ ? ReplicaRole::kLeader : ReplicaRole::kFollower;
   auto& state = partition_states_[partition];
   state.commit_index = std::min(std::max(state.commit_index, leader_commit), replicated_offset);
+  commit_index_ = std::max(commit_index_, state.commit_index);
+  last_applied_ = std::max(last_applied_, state.commit_index);
+  PersistLocked();
   if (leader_id != node_id_) {
     const auto membership = replicas_.find(leader_id);
     auto& replica = membership->second;
@@ -170,7 +239,23 @@ ElectionResult ReplicationCoordinator::BeginElection() {
   voted_for_ = node_id_;
   votes_.clear();
   votes_.insert(node_id_);
+  PersistLocked();
   return {current_term_, node_id_};
+}
+
+ElectionResult ReplicationCoordinator::BeginPreVote() const {
+  std::lock_guard lock(mutex_);
+  return {current_term_ + 1, node_id_};
+}
+
+bool ReplicationCoordinator::ObservePreVote(std::uint64_t term, const std::string& voter_id,
+                                            bool granted) {
+  std::lock_guard lock(mutex_);
+  if (term != current_term_ + 1 || !granted || voter_id.empty() ||
+      (voter_id != node_id_ && replicas_.find(voter_id) == replicas_.end()))
+    return false;
+  pre_votes_.insert(voter_id);
+  return pre_votes_.size() >= Majority();
 }
 
 bool ReplicationCoordinator::RequestVote(std::uint64_t term, const std::string& candidate_id) {
@@ -202,7 +287,25 @@ bool ReplicationCoordinator::RequestVote(std::uint64_t term, const std::string& 
   }
   if (!voted_for_.empty() && voted_for_ != candidate_id) return false;
   voted_for_ = candidate_id;
+  PersistLocked();
   return true;
+}
+
+bool ReplicationCoordinator::RequestPreVote(std::uint64_t term, const std::string& candidate_id,
+                                            std::uint64_t candidate_last_log_index,
+                                            std::uint64_t candidate_last_log_term) const {
+  std::lock_guard lock(mutex_);
+  if (candidate_id.empty() || term < current_term_ ||
+      (candidate_id != node_id_ && replicas_.find(candidate_id) == replicas_.end()))
+    return false;
+  std::uint64_t local_index = local_offset_;
+  std::uint64_t local_term = 0;
+  for (const auto& [partition, state] : partition_states_) {
+    local_index = std::max(local_index, state.local_offset);
+    local_term = std::max(local_term, state.last_log_term);
+  }
+  return candidate_last_log_term > local_term ||
+         (candidate_last_log_term == local_term && candidate_last_log_index >= local_index);
 }
 
 bool ReplicationCoordinator::ObserveVote(std::uint64_t term, const std::string& voter_id,
@@ -216,6 +319,7 @@ bool ReplicationCoordinator::ObserveVote(std::uint64_t term, const std::string& 
     role_ = ReplicaRole::kLeader;
     leader_id_ = node_id_;
     voted_for_ = node_id_;
+    PersistLocked();
     return true;
   }
   return false;
@@ -240,6 +344,9 @@ bool ReplicationCoordinator::AdvanceCommit(const PartitionKey& partition, std::u
   if (acknowledgements < Majority()) return false;
   state.commit_index = std::max(state.commit_index, offset);
   state.last_applied = state.commit_index;
+  commit_index_ = std::max(commit_index_, state.commit_index);
+  last_applied_ = std::max(last_applied_, state.last_applied);
+  PersistLocked();
   return true;
 }
 
@@ -253,6 +360,37 @@ void ReplicationCoordinator::RecordLocalOffset(const PartitionKey& partition,
   auto& state = partition_states_[partition];
   state.local_offset = std::max(state.local_offset, offset);
   state.last_log_term = current_term_;
+}
+
+bool ReplicationCoordinator::LogMatches(const PartitionKey& partition,
+                                        std::uint64_t prev_log_index,
+                                        std::uint64_t prev_log_term) const {
+  std::lock_guard lock(mutex_);
+  const auto it = partition_states_.find(partition);
+  const auto local_index = it == partition_states_.end() ? 0 : it->second.local_offset;
+  const auto local_term = it == partition_states_.end() ? 0 : it->second.last_log_term;
+  return prev_log_index == 0 ||
+         (prev_log_index == local_index && prev_log_term == local_term);
+}
+
+std::uint64_t ReplicationCoordinator::NextLogIndex(const PartitionKey& partition) const {
+  std::lock_guard lock(mutex_);
+  const auto it = partition_states_.find(partition);
+  return it == partition_states_.end() ? 0 : it->second.local_offset + 1;
+}
+
+bool ReplicationCoordinator::ObserveHeartbeatRound(bool majority_responded) {
+  std::lock_guard lock(mutex_);
+  if (role_ != ReplicaRole::kLeader) return false;
+  if (majority_responded) {
+    missed_heartbeat_rounds_ = 0;
+    return true;
+  }
+  if (++missed_heartbeat_rounds_ < 3) return true;
+  role_ = ReplicaRole::kFollower;
+  leader_id_.clear();
+  votes_.clear();
+  return false;
 }
 
 bool ReplicationCoordinator::Healthy(const ReplicaProgress& replica,

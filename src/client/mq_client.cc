@@ -490,6 +490,7 @@ const std::string& MqProducer::lastError() const {
 
 struct MqConsumer::Impl : MqProducer::Impl {
   std::string topic, group;
+  std::string member_id;
   std::uint32_t partition = 0;
   std::uint64_t next_offset = 0;
   std::deque<core::Message> pending_messages;
@@ -522,6 +523,73 @@ bool MqConsumer::subscribe(const std::string& topic, const std::string& group,
   impl_->next_offset = 0;
   impl_->pending_messages.clear();
   return !topic.empty() && !group.empty();
+}
+bool MqConsumer::joinGroup(const std::string& group, const std::string& member_id,
+                           const std::vector<std::string>& topics) {
+  if (group.empty() || member_id.empty() || topics.size() > 65535) return false;
+  impl_->group = group;
+  impl_->member_id = member_id;
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kJoinGroup;
+  std::string payload;
+  Put16(&payload, static_cast<std::uint16_t>(group.size()));
+  payload.append(group);
+  Put16(&payload, static_cast<std::uint16_t>(member_id.size()));
+  payload.append(member_id);
+  Put16(&payload, static_cast<std::uint16_t>(topics.size()));
+  for (const auto& topic : topics) {
+    if (topic.empty() || topic.size() > 65535) return false;
+    Put16(&payload, static_cast<std::uint16_t>(topic.size()));
+    payload.append(topic);
+  }
+  request.payload = std::move(payload);
+  mq::protocol::Response response;
+  return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk;
+}
+bool MqConsumer::syncGroup(std::vector<core::GroupAssignment>* assignments) {
+  if (assignments == nullptr || impl_->group.empty()) return false;
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kSyncGroup;
+  Put16(&request.payload, static_cast<std::uint16_t>(impl_->group.size()));
+  request.payload.append(impl_->group);
+  Put16(&request.payload, static_cast<std::uint16_t>(impl_->member_id.size()));
+  request.payload.append(impl_->member_id);
+  mq::protocol::Response response;
+  if (!impl_->Call(request, &response) || response.status != mq::protocol::Status::kOk ||
+      response.payload.size() < 4)
+    return false;
+  assignments->clear();
+  const auto count = Get32(response.payload, 0);
+  std::size_t position = 4;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    if (position + 2 > response.payload.size()) return false;
+    const auto size = Get16(response.payload, position);
+    position += 2;
+    if (position + size + 4 > response.payload.size()) return false;
+    core::GroupAssignment assignment;
+    assignment.topic.assign(response.payload, position, size);
+    position += size;
+    assignment.partition = Get32(response.payload, position);
+    position += 4;
+    assignments->push_back(std::move(assignment));
+  }
+  return position == response.payload.size();
+}
+bool MqConsumer::fetchGroupOffsets(const std::string& topic, std::uint32_t partition,
+                                   std::uint64_t* offset) {
+  if (offset == nullptr || topic.empty() || impl_->group.empty()) return false;
+  mq::protocol::Request request;
+  request.command = mq::protocol::Command::kOffsetFetch;
+  request.topic = topic;
+  Put16(&request.payload, static_cast<std::uint16_t>(impl_->group.size()));
+  request.payload.append(impl_->group);
+  Put32(&request.payload, partition);
+  mq::protocol::Response response;
+  if (!impl_->Call(request, &response) || response.status != mq::protocol::Status::kOk ||
+      response.payload.size() != 8)
+    return false;
+  *offset = Get64(response.payload, 0);
+  return true;
 }
 std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
   // 先消费已拉取的批次，减少网络往返；只有本地缓存为空时才发送 Fetch。

@@ -225,13 +225,17 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
 
 bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition,
                                const std::vector<core::Message>& messages, std::uint64_t term,
-                               std::uint64_t commit_index, const std::string& leader_id) {
+                               std::uint64_t commit_index, const std::string& leader_id,
+                               std::uint64_t prev_log_index, std::uint64_t prev_log_term,
+                               std::uint64_t* next_log_index) {
   if (messages.empty() || leader_id.empty() || leader_id.size() > UINT16_MAX) return false;
   std::string payload;
   Put64(&payload, term);
   Put64(&payload, commit_index);
   Put16(&payload, static_cast<std::uint16_t>(leader_id.size()));
   payload.append(leader_id);
+  Put64(&payload, prev_log_index);
+  Put64(&payload, prev_log_term);
   Put32(&payload, partition);
   Put32(&payload, static_cast<std::uint32_t>(messages.size()));
   for (const auto& message : messages) {
@@ -242,8 +246,11 @@ bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition
     Put32(&payload, static_cast<std::uint32_t>(message.value.size()));
     payload.append(message.value);
   }
-  return Call(static_cast<std::uint8_t>(protocol::Command::kReplicaAppend), topic,
-              std::move(payload), nullptr, true);
+  std::string response;
+  const bool success = Call(static_cast<std::uint8_t>(protocol::Command::kReplicaAppend), topic,
+                             std::move(payload), &response, true);
+  if (!success && next_log_index != nullptr && response.size() == 8) *next_log_index = Get64(response, 0);
+  return success;
 }
 
 bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partition,
@@ -283,6 +290,24 @@ bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id
     error_ = "invalid vote response";
     return false;
   }
+  *granted = response[0] != 0;
+  return true;
+}
+
+bool ReplicationClient::PreVote(std::uint64_t term, const std::string& candidate_id,
+                                bool* granted, std::uint64_t last_log_index,
+                                std::uint64_t last_log_term) {
+  if (granted == nullptr || candidate_id.empty() || candidate_id.size() > UINT16_MAX) return false;
+  std::string payload;
+  Put64(&payload, term);
+  Put16(&payload, static_cast<std::uint16_t>(candidate_id.size()));
+  payload.append(candidate_id);
+  Put64(&payload, last_log_index);
+  Put64(&payload, last_log_term);
+  std::string response;
+  if (!Call(static_cast<std::uint8_t>(protocol::Command::kReplicaVote), candidate_id,
+            std::move(payload), &response, true) || response.size() != 1)
+    return false;
   *granted = response[0] != 0;
   return true;
 }

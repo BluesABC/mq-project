@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <filesystem>
 
 int main() {
   using namespace std::chrono_literals;
@@ -49,5 +50,40 @@ int main() {
   term_guard.ObserveHeartbeat("node-b", 10, start);
   assert(term_guard.ObserveVote(term_round.term, "node-b", true));
   assert(!term_guard.AdvanceCommit(10));
+
+  const auto state_dir = std::filesystem::temp_directory_path() / "mq_raft_replication_test";
+  std::filesystem::remove_all(state_dir);
+  {
+    mq::server::ReplicationCoordinator persisted("node-p", mq::server::ReplicaRole::kFollower,
+                                                  5s, state_dir);
+    persisted.RegisterReplica("node-q");
+    const auto pre_vote = persisted.BeginPreVote();
+    assert(pre_vote.term == 1);
+    assert(persisted.ObservePreVote(pre_vote.term, "node-p", true) == false);
+    assert(persisted.ObservePreVote(pre_vote.term, "node-q", true));
+    const auto round = persisted.BeginElection();
+    assert(round.term == 1);
+    assert(persisted.votedFor() == "node-p");
+    persisted.SetLeader("node-p");
+    persisted.RecordLocalOffset("topic:0", 4);
+    persisted.ObserveHeartbeat("topic:0", "node-q", 4);
+  }
+  {
+    mq::server::ReplicationCoordinator restored("node-p", mq::server::ReplicaRole::kFollower,
+                                                 5s, state_dir);
+    assert(restored.term() == 1);
+    assert(restored.votedFor() == "node-p");
+  }
+  std::filesystem::remove_all(state_dir);
+
+  mq::server::ReplicationCoordinator matching("node-a");
+  matching.RecordLocalOffset("topic:0", 3);
+  assert(matching.LogMatches("topic:0", 0, 0));
+  assert(matching.LogMatches("topic:0", 3, matching.lastLogTerm()));
+  assert(!matching.LogMatches("topic:0", 2, matching.lastLogTerm()));
+  assert(matching.ObserveHeartbeatRound(false));
+  assert(matching.ObserveHeartbeatRound(false));
+  assert(!matching.ObserveHeartbeatRound(false));
+  assert(matching.role() == mq::server::ReplicaRole::kFollower);
   return 0;
 }

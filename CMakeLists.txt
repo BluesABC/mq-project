@@ -84,6 +84,7 @@ endif()
 add_library(mq_core
   src/core/logger.cc
   src/core/consumer_offset_store.cc
+  src/core/consumer_group_coordinator.cc
   src/core/memory_pool.cc
   src/core/queue_manager.cc
   src/core/storage/storage_engine.cc
@@ -150,6 +151,10 @@ if(MQ_BUILD_TESTS)
   target_link_libraries(mq_core_tests PRIVATE mq_core mq_protocol)
   target_include_directories(mq_core_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
   add_test(NAME mq_core_tests COMMAND mq_core_tests)
+  add_executable(mq_consumer_group_tests test/unit/consumer_group_coordinator_test.cc)
+  target_link_libraries(mq_consumer_group_tests PRIVATE mq_core)
+  target_include_directories(mq_consumer_group_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME mq_consumer_group_tests COMMAND mq_consumer_group_tests)
 
   add_executable(mq_protocol_fuzz_tests test/unit/protocol_fuzz_test.cc)
   target_link_libraries(mq_protocol_fuzz_tests PRIVATE mq_protocol)

@@ -133,12 +133,13 @@ offset 为全局递增逻辑偏移（相对 partition 首条消息，从 0 开�
 - ACL 采用当前单 Token 权限模型：`admin` 管理 Topic/指标，`produce` 控制生产，`consume` 控制拉取与位点提交，并可分别限制生产和消费 Topic。空白名单表示不限制 Topic。
 - 复制请求使用独立的复制 Token、`REPLICATION` 标记、成员校验和日志连续性校验，不能用普通客户端 Token 代替；Token 仅负责身份校验，生产环境必须配合 TLS 或可信加密代理。
 
-## 6. 高可用设计（复制，P2 已实现）
+## 6. 高可用设计（复制，阶段 1 Raft 完整复制）
 
-- **主从复制**：Producer 只写 Leader；Follower 定时从 Leader 拉取日志段增量，追加到本地存储。
+- **Raft 复制**：Producer 只写 Leader；Leader 通过 AppendEntries 主动推送日志，Follower 保留增量拉取作为恢复通道。
 - **提交语义**：`PRODUCE` 的 ack 时机支持 `ack=0 / ack=1 / ack=all` 三档。
 - **故障切换**：基于元数据服务/一致性算法选主，切换后消费位点从 `log_start_offset` 恢复。
-- P2 已实现 `ReplicationCoordinator`、TCP `ReplicationClient`、内部复制 Fetch/Append、周期增量拉取、复制心跳和 quorum ack。当前选主为确定性健康节点选择，尚未达到 Raft/ZAB 的任期、多数派日志提交和网络分区安全保证。
+- `ReplicationCoordinator` 持久化 `voted_for`、`commit_index`、`last_applied`；选举先执行 PreVote，AppendEntries 携带 prev log index/term 执行 Log Matching，失败返回回退索引。
+- Leader 连续三个心跳周期未得到多数派响应时降级为 Follower，写入路径随角色和 quorum 检查停止。
 
 ## 7. 模块接口
 

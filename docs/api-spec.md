@@ -46,8 +46,10 @@
 | 0x03 | LIST_TOPIC | 无 | topic 列表 |
 | 0x04 | METRICS | 无 | Prometheus 文本指标 |
 | 0x10 | PRODUCE | partition + key + value | offset + partition |
-| 0x20 | FETCH | partition + offset + max_bytes | 消息列表 |
-| 0x21 | COMMIT_OFFSET | group + partition + offset | 无 |
+| 0x20 | SYNC_GROUP | group + member_id + assignments | assignment 列表 |
+| 0x21 | OFFSET_FETCH | group + topic + partition | offset |
+| 0x22 | FETCH | partition + offset + max_bytes | 消息列表 |
+| 0x23 | COMMIT_OFFSET | group + partition + offset | 无 |
 | 0x30 | HEARTBEAT | group | 无 |
 
 ### 3.1 P1 MVP 载荷布局
@@ -61,13 +63,15 @@
 | `PRODUCE` | `partition(4) | key_len(2) | key | value_len(4) | value`；`partition=0xFFFFFFFF` 表示按 key 路由 | `partition(4) | offset(8)` |
 | `FETCH` | `partition(4) | offset(8) | max_bytes(4)`；消费者可在 partition 后追加 `group_len(2) | group`，Broker 将从已提交位点开始返回 | `count(4)`，重复 `offset(8) | timestamp_ms(8) | key_len(2) | key | value_len(4) | value` |
 
-P2 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求会被拒绝）：`REPLICA_FETCH(0x40)` 使用与 `FETCH` 相同的请求和响应布局；`REPLICA_APPEND(0x41)` 请求载荷为 `term(8) | commit_index(8) | leader_id_len(2) | leader_id | partition(4) | count(4)`，后接重复的消息记录，Follower 只接受连续的 offset；`REPLICA_VOTE(0x42)` 载荷为 `term(8) | candidate_id_len(2) | candidate_id | last_log_index(8) | last_log_term(8)`，用于多数派选举。副本节点必须拒绝低于本地任期或日志落后的复制请求。复制连接还必须通过节点间共享认证令牌，认证信息位于复制载荷前缀 `token_len(2) | token`，未配置令牌时 Broker 拒绝网络复制请求。
+P2/P1 内部复制命令（必须设置 `REPLICATION` flag，普通客户端请求会被拒绝）：`REPLICA_FETCH(0x40)` 使用与 `FETCH` 相同的请求和响应布局；`REPLICA_APPEND(0x41)` 请求载荷为 `term(8) | commit_index(8) | leader_id_len(2) | leader_id | prev_log_index(8) | prev_log_term(8) | partition(4) | count(4)`，后接重复的消息记录。Follower 必须校验 prev 日志匹配，只接受连续 offset；拒绝响应载荷为 `next_log_index(8)`，用于指导 Leader 回退。`REPLICA_VOTE(0x42)` 载荷为 `term(8) | candidate_id_len(2) | candidate_id | last_log_index(8) | last_log_term(8)`，用于正式选举和 PreVote 探测；PreVote 使用 `term=current_term+1`，不改变接收者任期或投票持久状态。副本节点必须拒绝低于本地任期或日志落后的复制请求。复制连接还必须通过节点间共享认证令牌，认证信息位于复制载荷前缀 `token_len(2) | token`，未配置令牌时 Broker 拒绝网络复制请求。
 
 普通客户端启用 `AUTHENTICATION(0x0020)` flag 后，所有命令载荷统一前置 `token_len(2) | token`；Broker 校验成功后移除此前缀，再按原命令布局解析。Broker 配置 `client_auth_token` 后拒绝缺失、错误或伪造该 flag 的普通请求；复制请求继续使用独立的 `REPLICATION` 认证令牌。Token 只提供身份校验，不提供 TLS 加密；生产环境必须配合 TLS 或可信加密代理。已认证客户端还会经过 ACL 授权：`admin` 控制 Topic/指标管理，`produce` 控制生产，`consume` 控制拉取与提交位点，并可分别配置生产和消费 Topic 白名单。
 
 `COMMIT_OFFSET` 请求载荷为 `group_len(2) | group | partition(4) | offset(8)`，Topic 取请求帧中的 `topic` 字段；复制 `HEARTBEAT` 请求载荷为 `node_id_len(2) | node_id | partition(4) | replicated_offset(8)`，带任期时在末尾追加 `term(8) | commit_index(8)`；普通 `HEARTBEAT` 请求载荷为空，成功返回空载荷。
 
-`METRICS` 请求不携带 topic 和 payload，仅允许普通客户端请求，成功响应为 UTF-8 Prometheus 文本格式。指标包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_commit_index`、`mq_replication_role`、`mq_topic_produce_quota_bytes_per_second` 和 `mq_topic_produce_bytes_used`。该命令只读，不修改 Broker 状态。
+Consumer Group 命令：`JOIN_GROUP(0x24)` 请求载荷为 `group_len(2) | group | member_id_len(2) | member_id | topic_count(2)`，后接 `topic_len(2) | topic`；响应为 `member_id_len(2) | member_id`。`SYNC_GROUP(0x20)` 请求载荷为 `group_len(2) | group | member_id_len(2) | member_id`，响应为 `assignment_count(4)`，后接 `topic_len(2) | topic | partition(4)`。`OFFSET_FETCH(0x21)` 请求载荷为 `group_len(2) | group | partition(4)`，Topic 取请求帧中的 `topic`，成功响应为 `offset(8)`。Consumer `HEARTBEAT` 可携带 `group_len(2) | group | member_id_len(2) | member_id`，用于更新成员存活时间；空载荷仍表示普通客户端心跳。
+
+`METRICS` 请求不携带 topic 和 payload，仅允许普通客户端请求，成功响应为 UTF-8 Prometheus 文本格式。指标包括 `mq_requests_total`、`mq_produce_total`、`mq_fetch_total`、`mq_errors_total`、`mq_replication_term`、`mq_raft_voted_for`、`mq_raft_commit_index`、`mq_raft_last_applied`、`mq_commit_index`、`mq_replication_role`、`mq_topic_produce_quota_bytes_per_second` 和 `mq_topic_produce_bytes_used`。该命令只读，不修改 Broker 状态。
 
 `PRODUCE` 的 SDK 扩展请求在 flags 设置 `PRODUCER_METADATA` 时，载荷前置 `producer_id(8) | sequence(8)`；Broker 按二元组去重并缓存响应。`PRODUCE_BATCH`（0x11）载荷为 `producer_id(8) | first_sequence(8) | count(4)`，后接重复的 `key_len(2) | key | value_len(4) | value`。ack flags：0 为 ack=0，1 为 ack=1，2 为 ack=all；当前 ack=all 返回 `NOT_SUPPORTED`。
 
