@@ -32,7 +32,9 @@ namespace mq::protocol {
  * 帧格式：
  * 请求帧：
  * ```
- * [Magic(2)][Version(1)][Command(1)][RequestId(8)][Flags(2)][TopicLen(2)][Topic(N)][PayloadLen(4)][Payload(M)]
+ * [Magic(2)][Version(1)][Command(1)][RequestId(8)]
+ * [Flags(2)][TopicLen(2)][Topic(N)]
+ * [PayloadLen(4)][Payload(M)]
  * ```
  * 响应帧：
  * ```

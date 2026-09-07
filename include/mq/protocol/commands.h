@@ -118,7 +118,9 @@ constexpr std::uint16_t kFlagAuthentication = 0x0020;    ///< 认证标志
  *
  * 帧布局：
  * ```
- * [Magic(2)][Version(1)][Command(1)][RequestId(8)][Flags(2)][TopicLen(2)][Topic(N)][PayloadLen(4)][Payload(M)]
+ * [Magic(2)][Version(1)][Command(1)][RequestId(8)]
+ * [Flags(2)][TopicLen(2)][Topic(N)]
+ * [PayloadLen(4)][Payload(M)]
  * ```
  *
  * 设计要点：
