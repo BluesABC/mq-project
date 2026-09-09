@@ -1,3 +1,15 @@
+/**
+ * @file protocol_fuzz_test.cc
+ * @brief 协议模糊测试(Fuzz Test)
+ * 
+ * 本文件包含对协议编解码器的模糊测试，验证以下功能：
+ * 1. 随机数据不会导致崩溃（鲁棒性测试）
+ * 2. 边界长度（超大payload）被正确拒绝
+ * 3. 流式解码器处理随机分片数据的正确性
+ * 
+ * 测试使用随机数生成器模拟各种异常输入场景。
+ */
+
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -10,20 +22,37 @@
 
 namespace {
 
+/**
+ * @brief 辅助函数：在字符串指定位置设置32位大端整数
+ * @param value 目标字符串
+ * @param position 写入位置
+ * @param number 要写入的32位整数
+ */
 void Set32(std::string* value, std::size_t position, std::uint32_t number) {
   for (int shift = 24; shift >= 0; shift -= 8)
     (*value)[position++] = static_cast<char>(number >> shift);
 }
 
+/**
+ * @brief 验证解码后的请求是否符合约束
+ * @param request 要验证的请求
+ */
 void CheckRequest(const mq::protocol::Request& request) {
   assert(request.topic.size() <= 65535);
   assert(request.payload.size() <= mq::protocol::kMaxPayloadBytes);
 }
 
+/**
+ * @brief 验证解码后的响应是否符合约束
+ * @param response 要验证的响应
+ */
 void CheckResponse(const mq::protocol::Response& response) {
   assert(response.payload.size() <= mq::protocol::kMaxPayloadBytes);
 }
 
+/**
+ * @brief 测试随机数据不会导致解码器崩溃
+ */
 void RandomFramesDoNotCrash() {
   std::mt19937 generator(0x4D515F46);
   std::uniform_int_distribution<std::size_t> size_distribution(0, 4096);
@@ -42,6 +71,9 @@ void RandomFramesDoNotCrash() {
   }
 }
 
+/**
+ * @brief 测试边界长度（超大payload）被正确拒绝
+ */
 void BoundaryLengthsAreRejected() {
   std::string oversized_request(20, '\0');
   oversized_request[0] = static_cast<char>(mq::protocol::kMagic >> 8);
@@ -58,6 +90,9 @@ void BoundaryLengthsAreRejected() {
   assert(!mq::protocol::ProtocolCodec::DecodeResponse(oversized_response, &response));
 }
 
+/**
+ * @brief 测试流式解码器处理随机分片数据的正确性
+ */
 void StreamDecoderHandlesRandomChunks() {
   mq::protocol::Request first;
   first.command = mq::protocol::Command::kHeartbeat;
@@ -95,6 +130,10 @@ void StreamDecoderHandlesRandomChunks() {
 
 }  // namespace
 
+/**
+ * @brief 主函数，运行所有协议模糊测试
+ * @return 0 表示测试成功
+ */
 int main() {
   RandomFramesDoNotCrash();
   BoundaryLengthsAreRejected();

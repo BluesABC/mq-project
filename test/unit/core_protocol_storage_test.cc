@@ -1,3 +1,18 @@
+/**
+ * @file core_protocol_storage_test.cc
+ * @brief 核心协议与存储单元测试
+ * 
+ * 本文件包含对消息队列核心协议和存储功能的单元测试，验证以下功能：
+ * 1. 协议编解码的往返一致性（Encode/Decode）
+ * 2. 请求流式解码（RequestStreamDecoder）
+ * 3. 存储引擎的写入和读取
+ * 4. 段文件索引和过期清理（Retention）
+ * 5. 损坏和截断日志文件的恢复
+ * 6. 消费者偏移量的持久化和加载
+ * 
+ * 测试使用临时目录模拟存储环境。
+ */
+
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -10,6 +25,9 @@
 
 namespace {
 
+/**
+ * @brief 测试协议编解码的往返一致性
+ */
 void ProtocolRoundTrip() {
   mq::protocol::Request original;
   original.command = mq::protocol::Command::kProduce;
@@ -26,6 +44,9 @@ void ProtocolRoundTrip() {
   assert(!mq::protocol::ProtocolCodec::DecodeRequest(frame, &decoded, &error));
 }
 
+/**
+ * @brief 测试请求流式解码（分片数据的正确重组）
+ */
 void RequestStreamDecoding() {
   mq::protocol::Request first;
   first.command = mq::protocol::Command::kHeartbeat;
@@ -50,6 +71,9 @@ void RequestStreamDecoding() {
   assert(requests[1].request_id == second.request_id && requests[1].payload == second.payload);
 }
 
+/**
+ * @brief 测试存储引擎的写入和读取往返
+ */
 void StorageRoundTrip() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_storage_test";
   std::error_code ec;
@@ -74,6 +98,9 @@ void StorageRoundTrip() {
   std::filesystem::remove_all(root, ec);
 }
 
+/**
+ * @brief 测试段文件索引生成和过期清理策略
+ */
 void SegmentsIndexesAndRetention() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_segment_test";
   std::error_code ec;
@@ -108,6 +135,9 @@ void SegmentsIndexesAndRetention() {
   std::filesystem::remove_all(root, ec);
 }
 
+/**
+ * @brief 测试损坏和截断日志文件的恢复机制
+ */
 void RecoveryDropsCorruptAndTruncatedTail() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_recovery_test";
   std::error_code ec;
@@ -163,6 +193,9 @@ void RecoveryDropsCorruptAndTruncatedTail() {
   std::filesystem::remove_all(truncated_root, ec);
 }
 
+/**
+ * @brief 测试消费者偏移量的原子性持久化和独立加载
+ */
 void ConsumerOffsetsPersistAtomicallyAndIndependently() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_offset_store_test";
   std::error_code ec;
@@ -181,6 +214,10 @@ void ConsumerOffsetsPersistAtomicallyAndIndependently() {
 
 }  // namespace
 
+/**
+ * @brief 主函数，运行所有核心协议与存储单元测试
+ * @return 0 表示测试成功
+ */
 int main() {
   ProtocolRoundTrip();
   RequestStreamDecoding();

@@ -1,3 +1,16 @@
+/**
+ * @file network_buffer_connection_test.cc
+ * @brief 网络缓冲区与连接单元测试
+ * 
+ * 本文件包含对网络缓冲区和TCP连接功能的单元测试，验证以下功能：
+ * 1. 内存池的所有权和容量限制
+ * 2. 网络缓冲区(Buffer)的追加、消费和读取
+ * 3. TCP连接的读写缓冲区管理
+ * 4. 连接在事件循环所有者线程上的操作
+ * 
+ * 测试使用多线程环境验证内存池的线程安全性。
+ */
+
 #include <atomic>
 #include <cassert>
 #include <future>
@@ -11,6 +24,9 @@
 
 namespace {
 
+/**
+ * @brief 测试内存池的所有权和容量限制
+ */
 void EnforcesMemoryPoolOwnershipAndCapacity() {
   mq::core::MemoryPool pool(32);
   assert(pool.Allocate(16, alignof(std::max_align_t)) != nullptr);
@@ -27,6 +43,9 @@ void EnforcesMemoryPoolOwnershipAndCapacity() {
   assert(!buffer.Append("qrs"));
 }
 
+/**
+ * @brief 测试连接在事件循环所有者线程上保持缓冲区
+ */
 void ConnectionKeepsBuffersOnOwnerLoop() {
   mq::network::EventLoop loop(32);
   assert(loop.Start());
@@ -63,6 +82,10 @@ void ConnectionKeepsBuffersOnOwnerLoop() {
 
 }  // namespace
 
+/**
+ * @brief 主函数，运行所有网络缓冲区与连接单元测试
+ * @return 0 表示测试成功
+ */
 int main() {
   EnforcesMemoryPoolOwnershipAndCapacity();
   ConnectionKeepsBuffersOnOwnerLoop();

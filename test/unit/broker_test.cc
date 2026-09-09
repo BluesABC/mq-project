@@ -1,3 +1,24 @@
+/**
+ * @file broker_test.cc
+ * @brief Broker模块单元测试
+ * 
+ * 本文件包含对消息队列Broker核心功能的单元测试，验证以下功能：
+ * 1. 主题(Topic)的创建、删除和元数据持久化
+ * 2. 消息的生产(Produce)和消费(Fetch)流程
+ * 3. 主题分区(Partition)管理
+ * 4. 消费者偏移量(Offset)提交与恢复
+ * 5. 幂等Producer去重机制
+ * 6. 批量消息生产
+ * 7. 请求频率限制(Rate Limiting)
+ * 8. 主题配额(Quota)管理
+ * 9. 复制(Replication)认证与数据同步
+ * 10. 客户端认证与授权(ACL)
+ * 11. 协议版本兼容性检查
+ * 12. 获取响应大小限制
+ * 
+ * 测试使用Google Test风格的断言验证Broker行为的正确性。
+ */
+
 #include "mq/server/broker.h"
 
 #include <cassert>
@@ -11,24 +32,51 @@
 
 namespace {
 
+/**
+ * @brief 将16位整数以大端字节序写入字符串
+ * @param out 目标字符串
+ * @param value 要写入的16位无符号整数
+ */
 void Put16(std::string* out, std::uint16_t value) {
   out->push_back(static_cast<char>(value >> 8));
   out->push_back(static_cast<char>(value));
 }
 
+/**
+ * @brief 将32位整数以大端字节序写入字符串
+ * @param out 目标字符串
+ * @param value 要写入的32位无符号整数
+ */
 void Put32(std::string* out, std::uint32_t value) {
   for (int shift = 24; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
 
+/**
+ * @brief 将64位整数以大端字节序写入字符串
+ * @param out 目标字符串
+ * @param value 要写入的64位无符号整数
+ */
 void Put64(std::string* out, std::uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
 
+/**
+ * @brief 从字符串中读取16位大端字节序整数
+ * @param input 源字符串
+ * @param position 起始位置
+ * @return 读取的16位无符号整数
+ */
 std::uint16_t Get16(const std::string& input, std::size_t position) {
   return (static_cast<std::uint16_t>(static_cast<unsigned char>(input[position])) << 8) |
          static_cast<unsigned char>(input[position + 1]);
 }
 
+/**
+ * @brief 从字符串中读取32位大端字节序整数
+ * @param input 源字符串
+ * @param position 起始位置
+ * @return 读取的32位无符号整数
+ */
 std::uint32_t Get32(const std::string& input, std::size_t position) {
   std::uint32_t value = 0;
   for (int index = 0; index < 4; ++index) {
@@ -37,6 +85,12 @@ std::uint32_t Get32(const std::string& input, std::size_t position) {
   return value;
 }
 
+/**
+ * @brief 从字符串中读取64位大端字节序整数
+ * @param input 源字符串
+ * @param position 起始位置
+ * @return 读取的64位无符号整数
+ */
 std::uint64_t Get64(const std::string& input, std::size_t position) {
   std::uint64_t value = 0;
   for (int index = 0; index < 8; ++index) {
@@ -45,6 +99,11 @@ std::uint64_t Get64(const std::string& input, std::size_t position) {
   return value;
 }
 
+/**
+ * @brief 列出Broker中所有主题
+ * @param broker Broker实例指针
+ * @return 主题元数据列表
+ */
 std::vector<mq::core::TopicMetadata> ListTopics(mq::server::Broker* broker) {
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kListTopic;
@@ -72,6 +131,11 @@ std::vector<mq::core::TopicMetadata> ListTopics(mq::server::Broker* broker) {
   return topics;
 }
 
+/**
+ * @brief 创建主题请求（使用默认主题名"orders"和3个分区）
+ * @param request_id 请求ID
+ * @return 构造的主题创建请求
+ */
 mq::protocol::Request CreateTopicRequest(std::uint64_t request_id) {
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kCreateTopic;
@@ -81,6 +145,13 @@ mq::protocol::Request CreateTopicRequest(std::uint64_t request_id) {
   return request;
 }
 
+/**
+ * @brief 创建主题请求（指定主题名和分区数）
+ * @param request_id 请求ID
+ * @param topic 主题名称
+ * @param partitions 分区数量
+ * @return 构造的主题创建请求
+ */
 mq::protocol::Request CreateTopicRequest(std::uint64_t request_id, std::string topic,
                                          std::uint32_t partitions) {
   auto request = CreateTopicRequest(request_id);
@@ -90,6 +161,13 @@ mq::protocol::Request CreateTopicRequest(std::uint64_t request_id, std::string t
   return request;
 }
 
+/**
+ * @brief 构造消息生产请求
+ * @param request_id 请求ID
+ * @param key 消息键
+ * @param value 消息值
+ * @return 构造的生产请求
+ */
 mq::protocol::Request ProduceRequest(std::uint64_t request_id, std::string key, std::string value) {
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kProduce;
@@ -103,6 +181,12 @@ mq::protocol::Request ProduceRequest(std::uint64_t request_id, std::string key, 
   return request;
 }
 
+/**
+ * @brief 构造消息获取请求
+ * @param request_id 请求ID
+ * @param partition 分区编号
+ * @return 构造的获取请求
+ */
 mq::protocol::Request FetchRequest(std::uint64_t request_id, std::uint32_t partition) {
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kFetch;
@@ -114,6 +198,13 @@ mq::protocol::Request FetchRequest(std::uint64_t request_id, std::uint32_t parti
   return request;
 }
 
+/**
+ * @brief 构造副本数据拉取请求
+ * @param request_id 请求ID
+ * @param partition 分区编号
+ * @param offset 起始偏移量
+ * @return 构造的副本拉取请求
+ */
 mq::protocol::Request ReplicaFetchRequest(std::uint64_t request_id, std::uint32_t partition,
                                           std::uint64_t offset) {
   mq::protocol::Request request;
@@ -127,6 +218,13 @@ mq::protocol::Request ReplicaFetchRequest(std::uint64_t request_id, std::uint32_
   return request;
 }
 
+/**
+ * @brief 构造副本数据追加请求
+ * @param request_id 请求ID
+ * @param partition 分区编号
+ * @param messages 要追加的消息数据
+ * @return 构造的副本追加请求
+ */
 mq::protocol::Request ReplicaAppendRequest(std::uint64_t request_id, std::uint32_t partition,
                                            const std::string& messages) {
   mq::protocol::Request request;
@@ -148,6 +246,10 @@ mq::protocol::Request ReplicaAppendRequest(std::uint64_t request_id, std::uint32
   return request;
 }
 
+/**
+ * @brief 为复制请求添加认证信息
+ * @param request 要认证的请求指针
+ */
 void AuthenticateReplication(mq::protocol::Request* request) {
   assert(request != nullptr);
   std::string prefix;
@@ -157,6 +259,11 @@ void AuthenticateReplication(mq::protocol::Request* request) {
   request->payload = std::move(prefix);
 }
 
+/**
+ * @brief 为客户端请求添加认证信息
+ * @param request 要认证的请求指针
+ * @param token 客户端认证令牌
+ */
 void AuthenticateClient(mq::protocol::Request* request, std::string_view token) {
   assert(request != nullptr && token.size() <= 65535);
   std::string prefix;
@@ -167,6 +274,14 @@ void AuthenticateClient(mq::protocol::Request* request, std::string_view token) 
   request->flags |= mq::protocol::kFlagAuthentication;
 }
 
+/**
+ * @brief 构造消费者偏移量提交请求
+ * @param request_id 请求ID
+ * @param group 消费者组名称
+ * @param partition 分区编号
+ * @param offset 要提交的偏移量
+ * @return 构造的偏移量提交请求
+ */
 mq::protocol::Request CommitRequest(std::uint64_t request_id, std::string group,
                                     std::uint32_t partition, std::uint64_t offset) {
   mq::protocol::Request request;
@@ -180,6 +295,11 @@ mq::protocol::Request CommitRequest(std::uint64_t request_id, std::string group,
   return request;
 }
 
+/**
+ * @brief 构造幂等生产请求（带有Producer元数据）
+ * @param request_id 请求ID
+ * @return 构造的幂等生产请求
+ */
 mq::protocol::Request IdempotentProduceRequest(std::uint64_t request_id) {
   auto request = ProduceRequest(request_id, "idem", "once");
   request.flags = mq::protocol::kFlagProducerMetadata | mq::protocol::kAckOne;
@@ -191,6 +311,14 @@ mq::protocol::Request IdempotentProduceRequest(std::uint64_t request_id) {
   return request;
 }
 
+/**
+ * @brief 构造批量消息生产请求
+ * @param request_id 请求ID
+ * @param producer_id 生产者ID（用于幂等性）
+ * @param first_sequence 第一条消息的序列号
+ * @param messages 消息列表，每个元素为(key, value)对
+ * @return 构造的批量生产请求
+ */
 mq::protocol::Request ProduceBatchRequest(
     std::uint64_t request_id, std::uint64_t producer_id, std::uint64_t first_sequence,
     const std::vector<std::pair<std::string, std::string>>& messages) {
@@ -211,6 +339,20 @@ mq::protocol::Request ProduceBatchRequest(
   return request;
 }
 
+/**
+ * @brief 测试Broker的核心功能：主题创建、消息生产消费、幂等性、偏移量提交、指标收集、限流和配额
+ * 
+ * 测试流程：
+ * 1. 创建Broker实例并打开
+ * 2. 测试主题创建（包括重复创建检测）
+ * 3. 测试主题列表查询
+ * 4. 测试消息生产和消费
+ * 5. 测试幂等Producer去重（包括并发重试）
+ * 6. 测试消费者偏移量提交
+ * 7. 测试指标(Metrics)收集
+ * 8. 测试请求频率限制
+ * 9. 测试主题配额管理
+ */
 void CreateProduceFetch() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_broker_test";
   std::error_code error;
@@ -277,6 +419,16 @@ void CreateProduceFetch() {
   std::filesystem::remove_all(root, error);
 }
 
+/**
+ * @brief 测试主题删除功能和协议版本不兼容检测
+ * 
+ * 测试流程：
+ * 1. 创建Broker实例并打开
+ * 2. 创建主题并生产消息
+ * 3. 删除主题并验证存储文件已被清理
+ * 4. 重新创建同名主题并验证数据已清空
+ * 5. 测试协议版本不兼容时的错误响应
+ */
 void DeleteTopicRemovesStorageAndVersionMismatchIsReported() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_delete_topic_test";
   std::error_code error;
@@ -306,6 +458,15 @@ void DeleteTopicRemovesStorageAndVersionMismatchIsReported() {
   std::filesystem::remove_all(root, error);
 }
 
+/**
+ * @brief 测试拒绝未认证的复制请求
+ * 
+ * 测试流程：
+ * 1. 配置Broker为leader模式并设置复制令牌
+ * 2. 发送未认证的复制拉取请求，验证被拒绝
+ * 3. 添加认证信息后重新发送，验证被接受
+ * 4. 发送未认证的复制生产请求，验证被拒绝
+ */
 void RejectsUnauthenticatedReplication() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_replication_auth_test";
   std::error_code error;
@@ -326,6 +487,16 @@ void RejectsUnauthenticatedReplication() {
   std::filesystem::remove_all(root, error);
 }
 
+/**
+ * @brief 测试客户端认证功能
+ * 
+ * 测试流程：
+ * 1. 配置Broker要求客户端认证
+ * 2. 发送未认证的请求，验证被拒绝
+ * 3. 使用错误令牌认证，验证被拒绝
+ * 4. 使用正确令牌认证，验证被接受
+ * 5. 测试生产请求的认证
+ */
 void RequiresClientAuthentication() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_client_auth_test";
   std::error_code error;
@@ -352,6 +523,16 @@ void RequiresClientAuthentication() {
   std::filesystem::remove_all(root, error);
 }
 
+/**
+ * @brief 测试客户端授权(ACL)功能
+ * 
+ * 测试流程：
+ * 1. 配置Broker的ACL策略：允许生产到"allowed"主题，禁止消费和管理操作
+ * 2. 测试允许的生产操作
+ * 3. 测试被禁止的生产操作（不同主题）
+ * 4. 测试被禁止的消费操作
+ * 5. 测试被禁止的管理操作（列出主题）
+ */
 void EnforcesClientAuthorization() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_client_acl_test";
   std::error_code error;
@@ -391,6 +572,14 @@ void EnforcesClientAuthorization() {
   std::filesystem::remove_all(root, error);
 }
 
+/**
+ * @brief 测试主题元数据持久化和恢复
+ * 
+ * 测试流程：
+ * 1. 创建Broker实例并创建多个主题
+ * 2. 关闭Broker（触发元数据持久化）
+ * 3. 重新打开Broker并验证主题元数据已恢复
+ */
 void RestoresTopicMetadata() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_metadata_test";
   std::error_code error;
@@ -415,6 +604,17 @@ void RestoresTopicMetadata() {
   std::filesystem::remove_all(root, error);
 }
 
+/**
+ * @brief 测试消息复制功能（连续消息的复制）
+ * 
+ * 测试流程：
+ * 1. 创建leader和follower两个Broker实例
+ * 2. 配置复制关系
+ * 3. 在leader上创建主题并生产消息
+ * 4. 从leader拉取数据并追加到follower
+ * 5. 验证follower上的数据与leader一致
+ * 6. 测试重复追加时的偏移量错误检测
+ */
 void ReplicatesContiguousMessages() {
   const auto leader_root = std::filesystem::temp_directory_path() / "mq_project_leader_test";
   const auto follower_root = std::filesystem::temp_directory_path() / "mq_project_follower_test";
@@ -450,6 +650,15 @@ void ReplicatesContiguousMessages() {
   std::filesystem::remove_all(follower_root, error);
 }
 
+/**
+ * @brief 测试获取响应大小限制（不超过协议最大负载）
+ * 
+ * 测试流程：
+ * 1. 创建Broker并生产大量消息（5000条，每条256字节）
+ * 2. 发送获取请求，请求最大1MB数据
+ * 3. 验证响应大小不超过协议最大负载限制
+ * 4. 验证至少返回了一条消息
+ */
 void LimitsFetchResponseToProtocolPayload() {
   const auto root = std::filesystem::temp_directory_path() / "mq_project_fetch_limit_test";
   std::error_code error;
@@ -480,6 +689,10 @@ void LimitsFetchResponseToProtocolPayload() {
 
 }  // namespace
 
+/**
+ * @brief 主函数，运行所有Broker单元测试
+ * @return 0 表示测试成功
+ */
 int main() {
   CreateProduceFetch();
   RestoresTopicMetadata();

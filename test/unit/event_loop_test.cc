@@ -1,3 +1,16 @@
+/**
+ * @file event_loop_test.cc
+ * @brief 事件循环(EventLoop)单元测试
+ * 
+ * 本文件包含对事件循环功能的单元测试，验证以下功能：
+ * 1. 任务在所有者线程上执行
+ * 2. 任务队列的排空(Drain)行为
+ * 3. 空闲回调(IdleCallback)在所有者线程上执行
+ * 4. 事件循环的启动和停止行为
+ * 
+ * 测试使用多线程环境验证线程安全性。
+ */
+
 #include "mq/network/event_loop.h"
 
 #include <atomic>
@@ -8,6 +21,9 @@
 
 namespace {
 
+/**
+ * @brief 测试任务在所有者线程上执行并正确排空
+ */
 void ExecutesOnOwnerThreadAndDrains() {
   constexpr std::size_t kTaskCount = 64;
   mq::network::EventLoop loop(128);
@@ -27,6 +43,9 @@ void ExecutesOnOwnerThreadAndDrains() {
   assert(!loop.QueueInLoop([] {}));
 }
 
+/**
+ * @brief 测试空闲回调在所有者线程上执行
+ */
 void IdleCallbackRunsOnOwnerThread() {
   mq::network::EventLoop loop(8);
   std::atomic<std::size_t> calls{0};
@@ -44,6 +63,10 @@ void IdleCallbackRunsOnOwnerThread() {
 
 }  // namespace
 
+/**
+ * @brief 主函数，运行所有事件循环单元测试
+ * @return 0 表示测试成功
+ */
 int main() {
   ExecutesOnOwnerThreadAndDrains();
   IdleCallbackRunsOnOwnerThread();
