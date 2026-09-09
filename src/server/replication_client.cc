@@ -1,16 +1,18 @@
-﻿// MQ 复制客户端实现
-//
-// ReplicationClient 负责与远程 Broker 节点进行复制通信：
-// 1. 数据拉取：从 Leader 拉取增量消息（REPLICA_FETCH）
-// 2. 数据追加：向 Follower 追加消息（REPLICA_APPEND）
-// 3. 心跳通信：报告复制进度和接收 Leader 状态
-// 4. 选举投票：参与预投票和正式投票
-//
-// 设计特点：
-// - 使用短连接，故障时可以独立重试
-// - 所有请求携带认证 Token，确保安全性
-// - 支持 Windows 和 Linux 跨平台
-// - 请求/响应使用大端序二进制协议
+﻿/** @file replication_client.cc
+ *  @brief MQ 复制客户端实现
+ *
+ *  ReplicationClient 负责与远程 Broker 节点进行复制通信：
+ *  1. 数据拉取：从 Leader 拉取增量消息（REPLICA_FETCH）
+ *  2. 数据追加：向 Follower 追加消息（REPLICA_APPEND）
+ *  3. 心跳通信：报告复制进度和接收 Leader 状态
+ *  4. 选举投票：参与预投票和正式投票
+ *
+ *  设计特点：
+ *  - 使用短连接，故障时可以独立重试
+ *  - 所有请求携带认证 Token，确保安全性
+ *  - 支持 Windows 和 Linux 跨平台
+ *  - 请求/响应使用大端序二进制协议
+ */
 
 #include "mq/server/replication_client.h"
 
@@ -37,7 +39,7 @@ constexpr Socket kInvalidSocket = -1;
 namespace mq::server {
 namespace {
 
-// 关闭 Socket
+/** @brief 关闭 Socket */
 void CloseSocket(Socket socket) {
 #ifdef _WIN32
   closesocket(socket);
@@ -46,43 +48,68 @@ void CloseSocket(Socket socket) {
 #endif
 }
 
-// 向字符串追加 16 位大端序整数
+/** @brief 向字符串追加 16 位大端序整数
+ *  @param out  目标字符串
+ *  @param value 待追加的 16 位无符号整数
+ */
 void Put16(std::string* out, std::uint16_t value) {
   out->push_back(static_cast<char>(value >> 8));
   out->push_back(static_cast<char>(value));
 }
 
-// 向字符串追加 32 位大端序整数
+/** @brief 向字符串追加 32 位大端序整数
+ *  @param out  目标字符串
+ *  @param value 待追加的 32 位无符号整数
+ */
 void Put32(std::string* out, std::uint32_t value) {
   for (int shift = 24; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
 
-// 向字符串追加 64 位大端序整数
+/** @brief 向字符串追加 64 位大端序整数
+ *  @param out  目标字符串
+ *  @param value 待追加的 64 位无符号整数
+ */
 void Put64(std::string* out, std::uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
 
-// 从字符串视图中读取 16 位大端序整数
+/** @brief 从字符串视图中读取 16 位大端序整数
+ *  @param data 源数据
+ *  @param pos  起始偏移量
+ *  @return 16 位无符号整数
+ */
 std::uint16_t Get16(std::string_view data, std::size_t pos) {
   return (static_cast<std::uint16_t>(static_cast<unsigned char>(data[pos])) << 8) |
          static_cast<unsigned char>(data[pos + 1]);
 }
 
-// 从字符串视图中读取 32 位大端序整数
+/** @brief 从字符串视图中读取 32 位大端序整数
+ *  @param data 源数据
+ *  @param pos  起始偏移量
+ *  @return 32 位无符号整数
+ */
 std::uint32_t Get32(std::string_view data, std::size_t pos) {
   std::uint32_t value = 0;
   for (int i = 0; i < 4; ++i) value = (value << 8) | static_cast<unsigned char>(data[pos + i]);
   return value;
 }
 
-// 从字符串视图中读取 64 位大端序整数
+/** @brief 从字符串视图中读取 64 位大端序整数
+ *  @param data 源数据
+ *  @param pos  起始偏移量
+ *  @return 64 位无符号整数
+ */
 std::uint64_t Get64(std::string_view data, std::size_t pos) {
   std::uint64_t value = 0;
   for (int i = 0; i < 8; ++i) value = (value << 8) | static_cast<unsigned char>(data[pos + i]);
   return value;
 }
 
-// 发送所有数据，处理部分发送情况
+/** @brief 发送所有数据，处理部分发送情况
+ *  @param socket 目标 Socket
+ *  @param data   待发送的数据
+ *  @return 是否发送成功
+ */
 bool SendAll(Socket socket, std::string_view data) {
   std::size_t sent = 0;
   while (sent < data.size()) {
@@ -93,7 +120,12 @@ bool SendAll(Socket socket, std::string_view data) {
   return true;
 }
 
-// 接收所有数据，处理部分接收情况
+/** @brief 接收所有数据，处理部分接收情况
+ *  @param socket 目标 Socket
+ *  @param data   接收缓冲区
+ *  @param size   期望接收的字节数
+ *  @return 是否接收成功
+ */
 bool ReceiveAll(Socket socket, char* data, std::size_t size) {
   std::size_t received = 0;
   while (received < size) {
@@ -104,7 +136,10 @@ bool ReceiveAll(Socket socket, char* data, std::size_t size) {
   return true;
 }
 
-// 设置 Socket 超时时间
+/** @brief 设置 Socket 超时时间
+ *  @param socket    目标 Socket
+ *  @param timeout_ms 超时毫秒数
+ */
 void SetTimeout(Socket socket, std::uint32_t timeout_ms) {
 #ifdef _WIN32
   const int value = static_cast<int>(timeout_ms);
@@ -121,7 +156,12 @@ void SetTimeout(Socket socket, std::uint32_t timeout_ms) {
 
 }  // namespace
 
-// 构造函数，初始化复制客户端
+/** @brief 构造函数，初始化复制客户端
+ *  @param host       远程 Broker 主机地址
+ *  @param port       远程 Broker 端口
+ *  @param timeout_ms 连接/请求超时毫秒数
+ *  @param auth_token 认证 Token
+ */
 ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::uint32_t timeout_ms,
                                      std::string auth_token)
     : host_(std::move(host)),
@@ -129,8 +169,18 @@ ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::
       timeout_ms_(timeout_ms == 0 ? 1000 : timeout_ms),
       auth_token_(std::move(auth_token)) {}
 
-// 核心 RPC 调用方法
-// 负责建立连接、发送请求、接收响应和解析响应
+/** @brief 核心 RPC 调用方法
+ *
+ *  负责建立连接、发送请求、接收响应和解析响应。
+ *  采用短连接模式，每次调用独立建连，故障时可独立重试。
+ *
+ *  @param command          命令类型
+ *  @param topic            目标 Topic 名称
+ *  @param payload          请求载荷
+ *  @param response_payload 输出参数，接收响应载荷
+ *  @param term_payload     是否为带 term 的载荷（用于 Leader 心跳/追加）
+ *  @return 是否调用成功
+ */
 bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std::string payload,
                              std::string* response_payload, bool term_payload) {
   // 检查认证 Token
@@ -224,8 +274,17 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
   return true;
 }
 
-// 从 Leader 拉取增量消息
-// Follower 使用此方法获取新的消息
+/** @brief 从 Leader 拉取增量消息
+ *
+ *  Follower 使用此方法从 Leader 获取新的消息。
+ *
+ *  @param topic    目标 Topic 名称
+ *  @param partition 目标分区号
+ *  @param offset   起始偏移量
+ *  @param max_bytes 最大拉取字节数
+ *  @param messages 输出参数，接收拉取到的消息列表
+ *  @return 是否拉取成功
+ */
 bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
                               std::uint64_t offset, std::uint32_t max_bytes,
                               std::vector<core::Message>* messages) {
@@ -274,8 +333,21 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
   return position == response.size();
 }
 
-// 向 Follower 追加消息
-// Leader 使用此方法同步数据给 Follower
+/** @brief 向 Follower 追加消息
+ *
+ *  Leader 使用此方法同步数据给 Follower。
+ *
+ *  @param topic           目标 Topic 名称
+ *  @param partition       目标分区号
+ *  @param messages        待追加的消息列表
+ *  @param term            当前任期号
+ *  @param commit_index    当前提交索引
+ *  @param leader_id       Leader 节点标识
+ *  @param prev_log_index  上一条日志的索引
+ *  @param prev_log_term   上一条日志的任期
+ *  @param next_log_index  输出参数，失败时返回下一个日志索引（用于日志冲突恢复）
+ *  @return 是否追加成功
+ */
 bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition,
                                const std::vector<core::Message>& messages, std::uint64_t term,
                                std::uint64_t commit_index, const std::string& leader_id,
@@ -309,8 +381,18 @@ bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition
   return success;
 }
 
-// 发送心跳
-// 报告复制进度或接收 Leader 状态
+/** @brief 发送心跳
+ *
+ *  报告复制进度或接收 Leader 状态。
+ *
+ *  @param topic             目标 Topic 名称
+ *  @param partition         目标分区号
+ *  @param node_id           当前节点标识
+ *  @param replicated_offset 已复制的消息偏移量
+ *  @param term              当前任期号（0 表示 Follower 心跳）
+ *  @param commit_index      当前提交索引
+ *  @return 是否发送成功
+ */
 bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partition,
                                   const std::string& node_id, std::uint64_t replicated_offset,
                                   std::uint64_t term, std::uint64_t commit_index) {
@@ -333,8 +415,17 @@ bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partit
               nullptr, term != 0);
 }
 
-// 请求投票
-// 候选节点请求其他节点投票
+/** @brief 请求投票
+ *
+ *  候选节点请求其他节点投票。
+ *
+ *  @param term            当前任期号
+ *  @param candidate_id    候选节点标识
+ *  @param granted         输出参数，是否授予投票
+ *  @param last_log_index  候选节点最后一条日志的索引
+ *  @param last_log_term   候选节点最后一条日志的任期
+ *  @return 是否请求成功
+ */
 bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id, bool* granted,
                              std::uint64_t last_log_index, std::uint64_t last_log_term) {
   if (granted == nullptr || candidate_id.empty() || candidate_id.size() > UINT16_MAX) return false;
@@ -357,8 +448,17 @@ bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id
   return true;
 }
 
-// 请求预投票
-// 预投票不递增任期，用于检测是否有可能赢得选举
+/** @brief 请求预投票
+ *
+ *  预投票不递增任期，用于检测是否有可能赢得选举。
+ *
+ *  @param term            当前任期号
+ *  @param candidate_id    候选节点标识
+ *  @param granted         输出参数，是否授予预投票
+ *  @param last_log_index  候选节点最后一条日志的索引
+ *  @param last_log_term   候选节点最后一条日志的任期
+ *  @return 是否请求成功
+ */
 bool ReplicationClient::PreVote(std::uint64_t term, const std::string& candidate_id,
                                 bool* granted, std::uint64_t last_log_index,
                                 std::uint64_t last_log_term) {

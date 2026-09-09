@@ -1,19 +1,22 @@
-// MQ Broker 服务入口
-//
-// main.cc 是消息队列 Broker 服务的主程序入口，负责：
-// 1. 配置解析：从配置文件读取所有参数
-// 2. 服务装配：初始化日志、存储引擎、Broker、网络服务器
-// 3. 启动服务：启动复制线程、开始监听客户端连接
-// 4. 优雅停机：处理信号、停止服务、刷新数据、关闭日志
-//
-// 支持的配置项：
-// - 网络：bind_address, bind_port, sub_reactor_threads
-// - 存储：data_dir, segment_size, retention_hours
-// - 复制：node_id, replica_role, replica_peers, replication_auth_token
-// - 认证：client_auth_token, client_auth_permissions, client_auth_produce_topics, client_auth_consume_topics
-// - TLS：tls_enabled, tls_certificate_file, tls_private_key_file, tls_ca_file, tls_require_client_certificate
-// - 限流：produce_rate_limit, topic_produce_quota_bytes
-// - 日志：log_file
+/**
+ * @file main.cc
+ * @brief MQ Broker 服务入口
+ *
+ * main.cc 是消息队列 Broker 服务的主程序入口，负责：
+ * 1. 配置解析：从配置文件读取所有参数
+ * 2. 服务装配：初始化日志、存储引擎、Broker、网络服务器
+ * 3. 启动服务：启动复制线程、开始监听客户端连接
+ * 4. 优雅停机：处理信号、停止服务、刷新数据、关闭日志
+ *
+ * 支持的配置项：
+ * - 网络：bind_address, bind_port, sub_reactor_threads
+ * - 存储：data_dir, segment_size, retention_hours
+ * - 复制：node_id, replica_role, replica_peers, replication_auth_token
+ * - 认证：client_auth_token, client_auth_permissions, client_auth_produce_topics, client_auth_consume_topics
+ * - TLS：tls_enabled, tls_certificate_file, tls_private_key_file, tls_ca_file, tls_require_client_certificate
+ * - 限流：produce_rate_limit, topic_produce_quota_bytes
+ * - 日志：log_file
+ */
 
 #include <atomic>
 #include <chrono>
@@ -35,12 +38,17 @@ namespace {
 // 全局停止标志，用于信号处理
 std::atomic<bool> g_stop{false};
 
-// 信号处理函数，设置停止标志
+/**
+ * @brief 信号处理函数，设置停止标志
+ * @param signum 信号编号（未使用）
+ */
 void OnSignal(int) {
   g_stop.store(true, std::memory_order_release);
 }
 
-// 配置结构体，包含所有配置项
+/**
+ * @brief 配置结构体，包含所有配置项
+ */
 struct Config {
   std::string bind_address = "127.0.0.1";  // 监听地址
   std::uint16_t bind_port = 9092;           // 监听端口
@@ -66,7 +74,11 @@ struct Config {
   std::vector<mq::server::ReplicationPeer> replica_peers;  // 副本节点列表
 };
 
-// 去除字符串两端的空白字符
+/**
+ * @brief 去除字符串两端的空白字符
+ * @param value 输入字符串
+ * @return 去除空白后的字符串
+ */
 std::string Trim(std::string value) {
   const auto first = value.find_first_not_of(" \t\r\n");
   if (first == std::string::npos) return {};
@@ -74,7 +86,12 @@ std::string Trim(std::string value) {
   return value.substr(first, last - first + 1);
 }
 
-// 解析逗号分隔的列表
+/**
+ * @brief 解析逗号分隔的列表
+ * @param text 输入文本
+ * @param values 输出列表
+ * @return 是否解析成功
+ */
 bool ParseList(const std::string& text, std::vector<std::string>* values) {
   if (values == nullptr) return false;
   values->clear();
@@ -91,8 +108,13 @@ bool ParseList(const std::string& text, std::vector<std::string>* values) {
   return true;
 }
 
-// 构建客户端授权配置
-// 解析权限字符串和 Topic 白名单
+/**
+ * @brief 构建客户端授权配置
+ * @param config 配置结构体
+ * @param authorization 输出授权配置
+ * @param error 错误信息
+ * @return 是否构建成功
+ */
 bool BuildClientAuthorization(const Config& config, mq::server::ClientAuthorization* authorization,
                               std::string* error) {
   if (authorization == nullptr) return false;
@@ -135,7 +157,12 @@ bool BuildClientAuthorization(const Config& config, mq::server::ClientAuthorizat
   return true;
 }
 
-// 解析无符号整数
+/**
+ * @brief 解析无符号整数
+ * @param text 输入文本
+ * @param value 输出数值
+ * @return 是否解析成功
+ */
 bool Number(const std::string& text, std::uint64_t* value) {
   try {
     std::size_t used = 0;
@@ -146,7 +173,12 @@ bool Number(const std::string& text, std::uint64_t* value) {
   }
 }
 
-// 解析带单位的大小（M/G）
+/**
+ * @brief 解析带单位的大小（M/G）
+ * @param text 输入文本
+ * @param value 输出数值
+ * @return 是否解析成功
+ */
 bool ParseSize(std::string text, std::uint64_t* value) {
   text = Trim(text);
   std::uint64_t multiplier = 1;
@@ -166,8 +198,13 @@ bool ParseSize(std::string text, std::uint64_t* value) {
          (*value = number * multiplier, true);
 }
 
-// 加载配置文件
-// 解析 INI 格式的配置文件
+/**
+ * @brief 加载配置文件
+ * @param path 配置文件路径
+ * @param config 输出配置结构体
+ * @param error 错误信息
+ * @return 是否加载成功
+ */
 bool LoadConfig(const std::filesystem::path& path, Config* config, std::string* error) {
   std::ifstream input(path);
   if (!input) {
@@ -265,7 +302,12 @@ bool LoadConfig(const std::filesystem::path& path, Config* config, std::string* 
 
 }  // namespace
 
-// 主函数，Broker 服务入口
+/**
+ * @brief 主函数，Broker 服务入口
+ * @param argc 命令行参数个数
+ * @param argv 命令行参数数组
+ * @return 退出状态码
+ */
 int main(int argc, char** argv) {
   try {
     // 解析命令行参数
