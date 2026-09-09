@@ -1,4 +1,26 @@
-﻿#include "mq/client/mq_client.h"
+﻿// MQ 客户端 SDK 实现
+//
+// 提供 MqProducer（生产者）和 MqConsumer（消费者）两个核心类的完整实现：
+//
+// MqProducer：消息生产
+//   - 连接 Broker（支持单 Broker 和多 Broker 自动选择）
+//   - 创建 Topic
+//   - 发送单条/批量消息，支持 AckMode（kZero/kOne/kAll）
+//   - 支持 TLS 加密和 Token 认证
+//   - 自动重连与退避策略
+//
+// MqConsumer：消息消费
+//   - 连接 Broker 并订阅 Topic
+//   - 消费者组协调（joinGroup/syncGroup）
+//   - 拉取消息（poll）与提交偏移量（commit）
+//   - 支持指定分区消费和自动分区分配
+//
+// 内部实现细节：
+//   - 使用 Pimpl 模式隐藏平台相关 socket 细节（Win32/Linux）
+//   - 手动编解码协议帧（Put16/Get16 等），与 Broker 端协议保持一致
+//   - 非阻塞 socket + 超时控制，防止网络异常导致永久阻塞
+
+#include "mq/client/mq_client.h"
 
 #include <algorithm>
 #include <atomic>
@@ -131,6 +153,8 @@ struct MqProducer::Impl {
       socket = kInvalidSocket;
     }
   }
+  // 建立 TCP 连接，支持多端点轮询；若启用 TLS 则在 TCP 之上完成 TLS 握手。
+  // 失败时自动尝试下一个端点，避免单点故障阻塞整个客户端。
   bool Connect() {
     if (socket != kInvalidSocket) return true;
     if (endpoints.empty() && !host.empty()) endpoints.emplace_back(host, port);
@@ -227,6 +251,9 @@ struct MqProducer::Impl {
     }
     return true;
   }
+  // 核心 RPC 调用：编码请求 -> 发送 -> 接收响应 -> 解码响应。
+  // 内置重试机制：连接失败指数退避重连，超时前持续重试；
+  // 遇到 kNotLeader 自动切换端点，保证请求最终路由到正确 Broker。
   bool Call(mq::protocol::Request request, mq::protocol::Response* response) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     // 每次重试都重新建立连接，但 deadline 不重置，保证调用方的超时有明确上界。
@@ -285,6 +312,8 @@ struct MqProducer::Impl {
     error = "request timeout";
     return false;
   }
+  // 火忘模式发送：仅编码并发送请求，不等待 Broker 响应。
+  // 用于 AckMode::kZero 场景，牺牲可靠性换取最低延迟；发送后立即关闭连接。
   bool SendWithoutResponse(mq::protocol::Request request) {
     if (!auth_token.empty()) {
       if (auth_token.size() > 65535) {
@@ -335,7 +364,9 @@ bool MqProducer::produce(const std::string& topic, const std::string& key,
                          const std::string& value) {
   return produce(topic, key, value, AckMode::kOne, nullptr);
 }
-bool MqProducer::produce(const std::string& topic, const std::string& key, const std::string& value,
+  // 发送单条消息：编码 producer_id + sequence（用于幂等去重）+ key + value 到协议帧。
+  // AckMode::kZero 直接火忘发送；kOne/kAll 等待 Broker 确认并返回写入的分区和 offset。
+  bool MqProducer::produce(const std::string& topic, const std::string& key, const std::string& value,
                          AckMode ack, ProduceResult* result) {
   if (key.size() > 65535 || value.empty() || value.size() > 1024 * 1024 ||
       impl_->sequence == UINT64_MAX) {
@@ -363,7 +394,9 @@ bool MqProducer::produce(const std::string& topic, const std::string& key, const
   }
   return true;
 }
-bool MqProducer::produceBatch(const std::string& topic,
+  // 批量发送消息：将多条消息打包到单个协议帧中发送，减少网络往返次数。
+  // sequence 自动递增，Broker 端按 (producer_id, sequence) 做幂等去重。
+  bool MqProducer::produceBatch(const std::string& topic,
                               const std::vector<ProducerMessage>& messages, AckMode ack,
                               std::vector<ProduceResult>* results) {
   if (messages.empty() || messages.size() > 10000 ||
@@ -413,7 +446,9 @@ bool MqProducer::flush() {
   mq::protocol::Response response;
   return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk;
 }
-bool MqProducer::listTopics(std::vector<TopicInfo>* topics) {
+  // 查询 Broker 上所有已创建的 Topic 列表，返回每个 Topic 的名称和分区数。
+  // 用于客户端在消费前确认 Topic 是否存在以及分区规模。
+  bool MqProducer::listTopics(std::vector<TopicInfo>* topics) {
   if (topics == nullptr) return false;
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kListTopic;
@@ -515,7 +550,9 @@ bool MqConsumer::connect(const std::vector<std::pair<std::string, std::uint16_t>
 bool MqConsumer::subscribe(const std::string& topic, const std::string& group) {
   return subscribe(topic, group, 0);
 }
-bool MqConsumer::subscribe(const std::string& topic, const std::string& group,
+  // 订阅指定 Topic 的特定分区，记录 group 和 partition 信息供后续 poll 使用。
+  // 不发送网络请求，仅设置本地状态；实际拉取在 poll() 时触发。
+  bool MqConsumer::subscribe(const std::string& topic, const std::string& group,
                            std::uint32_t partition) {
   impl_->topic = topic;
   impl_->group = group;
@@ -524,7 +561,9 @@ bool MqConsumer::subscribe(const std::string& topic, const std::string& group,
   impl_->pending_messages.clear();
   return !topic.empty() && !group.empty();
 }
-bool MqConsumer::joinGroup(const std::string& group, const std::string& member_id,
+  // 加入消费者组：向 Broker 注册成员信息和订阅的 Topic 列表。
+  // Broker 会将此成员加入组协调，后续通过 syncGroup 获取分区分配结果。
+  bool MqConsumer::joinGroup(const std::string& group, const std::string& member_id,
                            const std::vector<std::string>& topics) {
   if (group.empty() || member_id.empty() || topics.size() > 65535) return false;
   impl_->group = group;
@@ -546,7 +585,9 @@ bool MqConsumer::joinGroup(const std::string& group, const std::string& member_i
   mq::protocol::Response response;
   return impl_->Call(request, &response) && response.status == mq::protocol::Status::kOk;
 }
-bool MqConsumer::syncGroup(std::vector<core::GroupAssignment>* assignments) {
+  // 同步消费者组分配：向 Broker 请求当前成员的分区分配方案。
+  // 返回的 assignments 包含分配给本消费者的 (topic, partition) 列表。
+  bool MqConsumer::syncGroup(std::vector<core::GroupAssignment>* assignments) {
   if (assignments == nullptr || impl_->group.empty()) return false;
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kSyncGroup;
@@ -591,7 +632,9 @@ bool MqConsumer::fetchGroupOffsets(const std::string& topic, std::uint32_t parti
   *offset = Get64(response.payload, 0);
   return true;
 }
-std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
+  // 拉取消息：优先消费本地缓存（pending_messages），缓存为空时发送 Fetch 请求。
+  // 一次 Fetch 从 Broker 批量拉取多条消息缓存到本地，减少网络往返开销。
+  std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
   // 先消费已拉取的批次，减少网络往返；只有本地缓存为空时才发送 Fetch。
   if (!impl_->pending_messages.empty()) {
     auto message = std::move(impl_->pending_messages.front());
@@ -665,7 +708,9 @@ std::optional<core::Message> MqConsumer::poll(std::uint32_t timeout_ms) {
   impl_->next_offset = message.offset + 1;
   return message;
 }
-bool MqConsumer::commit(std::uint64_t offset) {
+  // 提交消费偏移量：告知 Broker 本消费者组在该分区的消费进度。
+  // Broker 持久化后，消费者重启时可从已提交位置继续消费，避免重复消费。
+  bool MqConsumer::commit(std::uint64_t offset) {
   mq::protocol::Request request;
   request.command = mq::protocol::Command::kCommitOffset;
   request.topic = impl_->topic;

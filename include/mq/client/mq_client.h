@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "mq/core/storage_engine.h"
 #include "mq/core/consumer_group_coordinator.h"
+#include "mq/core/storage_engine.h"
 #include "mq/network/tls.h"
 
 namespace mq::client {
@@ -49,7 +49,7 @@ struct ProducerMessage {
  * 包含 Topic 的名称和分区数量。
  */
 struct TopicInfo {
-  std::string name;             ///< Topic 名称
+  std::string name;              ///< Topic 名称
   std::uint32_t partitions = 0;  ///< 分区数量
 };
 
@@ -382,8 +382,7 @@ class MqConsumer {
    * @param offset 输出参数，消费偏移量
    * @return true 获取成功；false 网络错误
    */
-  bool fetchGroupOffsets(const std::string& topic, std::uint32_t partition,
-                         std::uint64_t* offset);
+  bool fetchGroupOffsets(const std::string& topic, std::uint32_t partition, std::uint64_t* offset);
 
   /**
    * @brief 拉取消息

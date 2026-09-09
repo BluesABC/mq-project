@@ -144,24 +144,43 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant C as MqConsumer
-    participant T as Reactor
-    participant B as Broker
-    participant O as OffsetStore
-    participant S as StorageEngine
+    participant Consumer as MqConsumer (SDK)
+    participant Reactor as Reactor
+    participant Broker as Broker
+    participant OffsetStore as ConsumerOffsetStore
+    participant Storage as StorageEngine
 
-    C->>T: FETCH(topic, group, partition, offset)
-    T->>B: decoded Request
-    B->>O: lookup committed offset
-    B->>S: Read(start_offset, max_bytes)
-    S-->>B: ordered messages, may cross Segments
-    B-->>C: FETCH response
-    C->>C: pending_messages queue
-    C->>T: COMMIT_OFFSET(group, partition, offset)
-    T->>B: decoded Request
-    B->>O: atomic save
-    O-->>C: OK
+    rect rgb(232, 245, 233)
+        Note over Consumer, Storage: 阶段一：FETCH — 拉取消息
+        Consumer ->> Consumer: 1. subscribe(topic, group, partition)
+        Consumer ->> Reactor: 2. poll() → FETCH(partition, offset, max_bytes)
+        Reactor ->> Broker: 3. 解码请求，调用 Broker::Handle(Fetch)
+        Broker ->> Broker: 4. QueueManager 校验 Topic/Partition
+        Broker ->> OffsetStore: 4. 查询 group 已提交 offset
+        OffsetStore -->> Broker: 返回已提交位置
+        Broker ->> Storage: 5. StorageEngine::Read(offset, max_bytes)
+        Storage -->> Broker: 返回消息列表（跨 Segment 顺序读取）
+        Broker -->> Reactor: 6. 编码消息列表返回
+        Reactor -->> Consumer: 6. 返回 FetchResponse
+        Consumer ->> Consumer: 6. 消息放入本地 pending_messages 队列
+        Consumer ->> Consumer: 后续 poll() 从 pending 逐条取出
+    end
+
+    rect rgb(227, 242, 253)
+        Note over Consumer, OffsetStore: 阶段二：COMMIT — 提交消费位点
+        Consumer ->> Reactor: 7. commit(offset)
+        Reactor ->> Broker: 转发 CommitOffset 请求
+        Broker ->> OffsetStore: 7. 原子更新 group+topic+partition → offset
+        Note right of OffsetStore: 持久化写入<br/>consumer_offsets.meta
+        OffsetStore -->> Broker: 写入成功
+        Broker -->> Reactor: 返回 OK
+        Reactor -->> Consumer: 返回 CommitResponse
+    end
 ```
+
+
+
+
 
 ### 3.3 高可用流程
 
@@ -343,6 +362,65 @@ WAL 记录采用 `crc32 + payload_len + payload` 格式；恢复时按 Segment �
 3. 对存储读取改为 Segment 元数据 + 稀疏索引定位 + 按需文件读取，降低超大数据集内存占用。
 4. 完成 5 万连接、24 小时稳定性、长时间段滚动和故障恢复基线，记录内存峰值、磁盘写入放大、RTO/RPO 和 p99 长尾。
 5. 在明确兼容性目标后，再评估 Kafka 协议兼容、Schema、事务或跨地域复制等生态功能。
+
+## 7. 最近更新（2026-09-09）
+
+### 7.1 代码注释完善
+
+本次更新主要完善了核心模块的代码注释，提升代码可读性和可维护性：
+
+#### 7.1.1 性能基准工具 `mq_bench.cc`
+
+- **文件级注释**：添加工具用途说明，明确支持 produce/consume 两种模式，列出典型用法示例
+- **关键函数注释**：
+  - `ResolveTopicPartitions`：消费端分区查询，用于限定最大并行 worker 数
+  - `TryCountMessage`：无锁原子操作计数，避免多线程竞争时 mutex 成为瓶颈
+  - `EffectiveBatch`：根据协议帧最大负载计算单批最大消息数，防止单帧超限
+- **关键逻辑注释**：
+  - Producer ID 基底生成：用当前时间戳作为 producerId 基底，避免多进程/多次运行时 ID 冲突
+  - 原子任务分发：使用 fetch_add 实现无锁任务分发，各 worker 均匀获取消息批次
+  - 消费超时检测：连续 10 秒无消息视为异常，防止 Benchmark 因 Broker 无响应而永久阻塞
+  - 批量 offset 提交：每 batch 条提交一次 offset，降低 commit 频率提升吞吐
+
+#### 7.1.2 客户端 SDK `mq_client.cc`
+
+- **文件级注释**：说明 MqProducer 和 MqConsumer 的核心功能和内部实现细节
+- **MqProducer 关键方法注释**：
+  - `Connect`：建立 TCP 连接，支持多端点轮询；若启用 TLS 则在 TCP 之上完成 TLS 握手
+  - `Call`：核心 RPC 调用，内置重试机制：连接失败指数退避重连，遇到 kNotLeader 自动切换端点
+  - `SendWithoutResponse`：火忘模式发送，用于 AckMode::kZero 场景
+  - `produce`：发送单条消息，编码 producer_id + sequence（用于幂等去重）
+  - `produceBatch`：批量发送消息，减少网络往返次数
+  - `listTopics`：查询 Broker 上所有已创建的 Topic 列表
+- **MqConsumer 关键方法注释**：
+  - `subscribe`：订阅指定 Topic 的特定分区，仅设置本地状态
+  - `joinGroup`：加入消费者组，向 Broker 注册成员信息和订阅的 Topic 列表
+  - `syncGroup`：同步消费者组分配，获取分区分配方案
+  - `poll`：拉取消息，优先消费本地缓存，缓存为空时发送 Fetch 请求
+  - `commit`：提交消费偏移量，告知 Broker 本消费者组在该分区的消费进度
+
+### 7.2 文档更新
+
+#### 7.2.1 消费流程时序图优化
+
+更新了 `docs/project-architecture-analysis.md` 中的消息消费流程时序图：
+
+- **阶段划分**：将消费流程明确分为 FETCH（拉取消息）和 COMMIT（提交消费位点）两个阶段
+- **参与者命名**：使用更清晰的命名（MqConsumer (SDK)、Reactor、Broker、ConsumerOffsetStore、StorageEngine）
+- **详细步骤**：为每个步骤添加编号和说明，便于理解
+- **持久化说明**：在 COMMIT 阶段明确标注持久化写入 consumer_offsets.meta
+
+### 7.3 验证结果
+
+- Windows Debug 构建通过
+- clang-format 检查通过
+- 所有文档已同步更新
+
+### 7.4 后续建议
+
+1. **注释规范**：建议在 AGENTS.md 中补充代码注释规范，明确注释的必要内容和格式
+2. **文档自动化**：考虑使用 Doxygen 等工具自动生成 API 文档
+3. **代码审查**：在 PR 审查中增加注释完整性检查
 
 ## 结论
 

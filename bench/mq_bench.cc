@@ -1,3 +1,17 @@
+// MQ 性能基准测试工具
+//
+// 支持 produce（生产）和 consume（消费）两种模式：
+//   - produce：多线程并发发送消息到 Broker，测量发送吞吐量和延迟
+//   - consume：多消费者订阅 topic，拉取消息并测量消费延迟
+//
+// 核心指标：TPS（每秒处理消息数）、延迟分位数（avg/p50/p99/p999）
+// 典型用法：
+//   mq_bench produce --topic test --messages 1000000 --size 256 --connections 4
+//   mq_bench consume --topic test --messages 1000000 --connections 4
+//
+// 通过 --batch 控制每批消息数（受协议帧最大负载约束），
+// 通过 --partitions 指定 topic 分区数（consume 模式自动查询）。
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -62,6 +76,8 @@ bool Parse(int argc, char** argv, Options* options) {
   }
   return options->messages > 0 && options->size > 0;
 }
+// 消费端需独立查询 topic 实际分区数，用于限定最大并行 worker 数（每个分区只能被一个消费者组成员消费），
+// 同时消费端无法通过 createTopic 获取已有分区数，故单独查询
 bool ResolveTopicPartitions(const Options& options, std::uint32_t* partitions, std::string* error) {
   mq::client::MqProducer producer;
   if (!producer.connect(options.host, options.port)) {
@@ -84,6 +100,7 @@ bool ResolveTopicPartitions(const Options& options, std::uint32_t* partitions, s
   if (error != nullptr) *error = "topic not found";
   return false;
 }
+// 无锁原子操作计数已完成消息数，避免多线程竞争时 mutex 成为瓶颈
 bool TryCountMessage(std::atomic<std::uint64_t>* completed, std::uint64_t limit) {
   auto current = completed->load(std::memory_order_relaxed);
   while (current < limit &&
@@ -92,6 +109,8 @@ bool TryCountMessage(std::atomic<std::uint64_t>* completed, std::uint64_t limit)
   }
   return current < limit;
 }
+// 根据协议帧最大负载（kMaxPayloadBytes）计算单批最大消息数，
+// 防止单帧超限导致 Broker 拒绝或截断
 std::uint32_t EffectiveBatch(const Options& options) {
   constexpr std::uint64_t kBatchFixedBytes = 20;
   constexpr std::uint64_t kGeneratedKeyLimit = 64;
@@ -147,6 +166,7 @@ int main(int argc, char** argv) {
   std::atomic<bool> failed{false};
   std::vector<std::uint64_t> producer_completed(options.connections, 0);
   std::vector<std::thread> workers;
+  // 用当前时间戳作为 producerId 基底，避免多进程/多次运行时 ID 冲突
   const auto producer_id_base = static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(start.time_since_epoch()).count());
   auto record_worker_error = [&](std::uint32_t connection, const std::exception& exception) {
@@ -188,6 +208,7 @@ int main(int argc, char** argv) {
             }
             std::uint64_t done = 0;
             while (!failed.load()) {
+              // 原子 fetch_add 实现无锁任务分发，各 worker 均匀获取消息批次
               const auto begin_message = next_message.fetch_add(options.batch);
               if (begin_message >= options.messages) break;
               const auto current = static_cast<std::size_t>(
@@ -248,6 +269,7 @@ int main(int argc, char** argv) {
               const auto begin = std::chrono::steady_clock::now();
               auto message = consumer.poll(1000);
               if (!message) {
+                // 连续 10 秒无消息视为异常，防止 Benchmark 因 Broker 无响应而永久阻塞
                 if (std::chrono::steady_clock::now() - idle_since > std::chrono::seconds(10)) {
                   const auto detail = consumer.lastError().empty()
                                           ? "no messages received before idle timeout"
@@ -262,6 +284,7 @@ int main(int argc, char** argv) {
               last_offset = message->offset + 1;
               has_uncommitted_offset = true;
               ++consumed_by_worker;
+              // 每 batch 条提交一次 offset，降低 commit 频率提升吞吐（与生产场景一致）
               if (consumed_by_worker % options.batch == 0 && !consumer.commit(last_offset)) {
                 record_worker_error(connection, std::runtime_error(consumer.lastError().empty()
                                                                        ? "commit failed"
