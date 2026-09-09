@@ -1,4 +1,22 @@
-﻿#include "mq/server/broker.h"
+﻿// MQ Broker 核心实现
+//
+// Broker 是消息队列服务的核心组件，负责：
+// 1. 处理所有客户端请求（生产、消费、Topic 管理、消费者组协调等）
+// 2. 管理消息存储（WAL 持久化、Segment 管理）
+// 3. 协调副本复制（Leader/Follower 同步、选举、提交索引）
+// 4. 实现安全控制（Token 认证、ACL 权限、限流、配额）
+//
+// 主要功能模块：
+// - 请求分发：根据命令类型分发到对应的处理函数
+// - Topic 管理：创建、删除、列出 Topic
+// - 消息生产：单条/批量生产，支持幂等去重
+// - 消息消费：拉取消息、提交偏移量
+// - 消费者组：加入组、同步分配、心跳维护
+// - 副本复制：Leader 同步数据、Follower 拉取、选举投票
+// - 安全认证：Token 验证、ACL 权限检查
+// - 限流配额：生产请求限流、Topic 字节配额
+
+#include "mq/server/broker.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -17,24 +35,30 @@
 namespace mq::server {
 namespace {
 
+// 生成随机选举超时时间（150-300毫秒）
+// 用于 Follower 转换为 Candidate 时的超时判定
 std::chrono::milliseconds NextElectionTimeout(std::mt19937* generator) {
   std::uniform_int_distribution<int> distribution(150, 300);
   return std::chrono::milliseconds(distribution(*generator));
 }
 
+// 向字符串追加 16 位大端序整数
 void Put16(std::string* out, std::uint16_t value) {
   out->push_back(static_cast<char>(value >> 8));
   out->push_back(static_cast<char>(value));
 }
 
+// 向字符串追加 32 位大端序整数
 void Put32(std::string* out, std::uint32_t value) {
   for (int shift = 24; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
 
+// 向字符串追加 64 位大端序整数
 void Put64(std::string* out, std::uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
 
+// 从字符串视图中消费指定字节数，移动位置指针
 bool Take(std::string_view input, std::size_t* position, std::size_t count) {
   if (position == nullptr || *position > input.size() || count > input.size() - *position)
     return false;
@@ -42,11 +66,13 @@ bool Take(std::string_view input, std::size_t* position, std::size_t count) {
   return true;
 }
 
+// 从字符串视图中读取 16 位大端序整数
 std::uint16_t Get16(std::string_view input, std::size_t position) {
   return (static_cast<std::uint16_t>(static_cast<unsigned char>(input[position])) << 8) |
          static_cast<unsigned char>(input[position + 1]);
 }
 
+// 从字符串视图中读取 32 位大端序整数
 std::uint32_t Get32(std::string_view input, std::size_t position) {
   std::uint32_t value = 0;
   for (int index = 0; index < 4; ++index) {
@@ -55,6 +81,7 @@ std::uint32_t Get32(std::string_view input, std::size_t position) {
   return value;
 }
 
+// 从字符串视图中读取 64 位大端序整数
 std::uint64_t Get64(std::string_view input, std::size_t position) {
   std::uint64_t value = 0;
   for (int index = 0; index < 8; ++index) {
@@ -62,6 +89,9 @@ std::uint64_t Get64(std::string_view input, std::size_t position) {
   }
   return value;
 }
+
+// 常量时间比较两个字符串，防止时序攻击
+// 用于安全比较 Token 和密码
 bool ConstantTimeEqual(std::string_view left, std::string_view right) {
   if (left.size() != right.size()) return false;
   unsigned char difference = 0;
@@ -70,20 +100,27 @@ bool ConstantTimeEqual(std::string_view left, std::string_view right) {
                   static_cast<unsigned char>(right[index]);
   return difference == 0;
 }
+
+// 生成幂等性键，用于去重
+// 格式：topic + "\x1f" + producer_id + ":" + sequence
 std::string IdempotencyKey(const std::string& topic, std::uint64_t producer_id,
                            std::uint64_t sequence) {
-  // Producer 重试时复用同一序号，Broker 用该键避免重复写入 WAL。
   return topic + "\x1f" + std::to_string(producer_id) + ":" + std::to_string(sequence);
 }
 
 }  // namespace
 
+// 生成分区键，格式：topic + "\x1f" + partition
+// 用于在复制协调器中标识特定分区
 std::string Broker::PartitionKey(const std::string& topic, std::uint32_t partition) {
   return topic + "\x1f" + std::to_string(partition);
 }
 
+// 默认构造函数，使用默认存储配置
 Broker::Broker(std::filesystem::path data_dir)
     : Broker(std::move(data_dir), core::StorageConfig{}) {}
+
+// 主构造函数，初始化存储引擎、元数据存储、偏移量存储和复制协调器
 Broker::Broker(std::filesystem::path data_dir, core::StorageConfig storage_config)
     : storage_(data_dir, storage_config),
       data_dir_(data_dir),
@@ -92,10 +129,13 @@ Broker::Broker(std::filesystem::path data_dir, core::StorageConfig storage_confi
       storage_config_(storage_config),
       replication_coordinator_(std::make_unique<ReplicationCoordinator>(node_id_)) {}
 
+// 析构函数，停止复制线程
 Broker::~Broker() {
   StopReplication();
 }
 
+// 配置副本复制参数
+// 包括节点 ID、Peer 列表、Quorum 数量、角色和认证 Token
 void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPeer> peers,
                                   std::size_t quorum, bool follower, std::string auth_token) {
   node_id_ = std::move(node_id);
@@ -111,15 +151,21 @@ void Broker::ConfigureReplication(std::string node_id, std::vector<ReplicationPe
     replication_coordinator_->RegisterReplica(peer.node_id);
 }
 
+// 配置客户端认证参数
+// 包括认证 Token 和 ACL 权限
 void Broker::ConfigureClientAuth(std::string auth_token, ClientAuthorization authorization) {
   client_auth_token_ = std::move(auth_token);
   client_authorization_ = std::move(authorization);
 }
 
+// 检查 Topic 是否在允许列表中
+// 如果允许列表为空，则允许所有 Topic
 bool Broker::TopicAllowed(const std::vector<std::string>& topics, const std::string& topic) {
   return topics.empty() || std::find(topics.begin(), topics.end(), topic) != topics.end();
 }
 
+// 验证客户端请求的 ACL 权限
+// 根据命令类型检查对应的权限（admin/produce/consume）
 bool Broker::AuthorizeClientRequest(const protocol::Request& request) const {
   switch (request.command) {
     case protocol::Command::kCreateTopic:
@@ -145,6 +191,8 @@ bool Broker::AuthorizeClientRequest(const protocol::Request& request) const {
   }
 }
 
+// 配置生产请求限流
+// 设置每秒允许的最大请求数，使用令牌桶算法
 void Broker::ConfigureRateLimit(std::uint64_t produce_requests_per_second) {
   std::lock_guard lock(rate_limit_mutex_);
   produce_rate_limit_ = produce_requests_per_second;
@@ -152,12 +200,16 @@ void Broker::ConfigureRateLimit(std::uint64_t produce_requests_per_second) {
   produce_last_refill_ = std::chrono::steady_clock::now();
 }
 
+// 配置 Topic 生产字节配额
+// 设置每个 Topic 每秒允许的最大字节数
 void Broker::ConfigureTopicQuota(std::uint64_t produce_bytes_per_second) {
   std::lock_guard lock(topic_quota_mutex_);
   topic_produce_quota_ = produce_bytes_per_second;
   topic_quota_windows_.clear();
 }
 
+// 检查是否允许生产请求
+// 使用令牌桶算法进行限流
 bool Broker::AllowProduceRequest() {
   std::lock_guard lock(rate_limit_mutex_);
   if (produce_rate_limit_ == 0) return true;
@@ -171,6 +223,8 @@ bool Broker::AllowProduceRequest() {
   return true;
 }
 
+// 检查 Topic 是否超过字节配额
+// 使用滑动窗口算法，每秒重置一次
 bool Broker::AllowTopicBytes(const std::string& topic, std::uint64_t bytes) {
   std::lock_guard lock(topic_quota_mutex_);
   if (topic_produce_quota_ == 0) return true;
@@ -186,18 +240,25 @@ bool Broker::AllowTopicBytes(const std::string& topic, std::uint64_t bytes) {
   return true;
 }
 
+// 启动复制线程
+// 复制线程负责与 Peer 同步数据、处理选举和心跳
 void Broker::StartReplication() {
   if (replication_thread_.joinable()) return;
   stop_replication_.store(false, std::memory_order_release);
   replication_thread_ = std::thread(&Broker::ReplicationLoop, this);
 }
 
+// 停止复制线程
 void Broker::StopReplication() {
   stop_replication_.store(true, std::memory_order_release);
   replication_cv_.notify_all();
   if (replication_thread_.joinable()) replication_thread_.join();
 }
 
+// 复制线程主循环
+// 负责与 Peer 同步数据、处理选举和心跳
+// Leader 模式：向 Follower 发送心跳和增量数据
+// Follower 模式：从 Leader 拉取增量数据，超时触发选举
 void Broker::ReplicationLoop() {
   try {
     std::mt19937 election_generator(static_cast<std::uint32_t>(
@@ -205,7 +266,7 @@ void Broker::ReplicationLoop() {
     auto election_timeout = NextElectionTimeout(&election_generator);
     auto last_election = std::chrono::steady_clock::now() - election_timeout;
     while (!stop_replication_.load(std::memory_order_acquire)) {
-      // 复制线程只负责与 Peer 同步，不占用处理客户端请求的 Reactor 线程。
+      // Follower 模式：从 Leader 拉取增量数据
       if (replication_coordinator_->role() != ReplicaRole::kLeader) {
         bool leader_seen = false;
         for (const auto& peer : replication_peers_) {
@@ -247,12 +308,13 @@ void Broker::ReplicationLoop() {
             }
           }
         }
+        // 检查选举超时
         const auto now = std::chrono::steady_clock::now();
         if (leader_seen) {
-          // 收到 Leader 心跳后重新计时，避免正常心跳期间误触发选举。
           last_election = now;
           election_timeout = NextElectionTimeout(&election_generator);
         } else if (now - last_election >= election_timeout) {
+          // 发起预投票
           const auto pre_vote = replication_coordinator_->BeginPreVote();
           bool pre_vote_majority =
               replication_coordinator_->ObservePreVote(pre_vote.term, node_id_, true);
@@ -268,6 +330,7 @@ void Broker::ReplicationLoop() {
                   pre_vote.term, peer.node_id, true) || pre_vote_majority;
             }
           }
+          // 预投票成功后发起正式投票
           if (pre_vote_majority) {
             const auto election = replication_coordinator_->BeginElection();
             replication_coordinator_->ObserveVote(election.term, node_id_, true);
@@ -286,6 +349,7 @@ void Broker::ReplicationLoop() {
           election_timeout = NextElectionTimeout(&election_generator);
         }
       } else {
+        // Leader 模式：向 Follower 发送心跳和增量数据
         std::size_t heartbeat_responses = 1;
         for (const auto& peer : replication_peers_) {
           ReplicationClient client(peer.host, peer.port, 1000, replication_auth_token_);
@@ -321,36 +385,44 @@ void Broker::ReplicationLoop() {
             }
           }
         }
+        // 检查是否达到多数派
         replication_coordinator_->ObserveHeartbeatRound(
             heartbeat_responses >= (replication_peers_.size() + 2) / 2 + 1);
       }
+      // 等待 250ms 或收到停止信号
       std::unique_lock lock(replication_mutex_);
       replication_cv_.wait_for(lock, std::chrono::milliseconds(250), [this] {
         return stop_replication_.load(std::memory_order_acquire);
       });
     }
   } catch (...) {
-    // Replication is best effort; a peer failure must not terminate Broker.
+    // 复制是尽力而为的，Peer 故障不应终止 Broker
   }
 }
 
+// 打开 Broker，初始化存储引擎并加载元数据
 bool Broker::Open(std::string* error) {
   if (opened_) return true;
   if (!storage_.Open(error)) {
     core::Logger::Instance().Log(core::LogLevel::kCritical, "broker storage initialization failed");
     return false;
   }
+  // 加载 Topic 元数据
   std::vector<core::TopicMetadata> topics;
   if (!metadata_store_.Load(&topics, error) || !queues_.ReplaceTopics(std::move(topics), error))
     return false;
+  // 初始化消费者组分区信息
   for (const auto& topic : queues_.ListTopics())
     consumer_groups_.SetPartitions(topic.name, topic.partition_count);
+  // 加载消费者偏移量
   if (!offset_store_.Load(&consumer_offsets_, error)) return false;
   opened_ = true;
   core::Logger::Instance().Log(core::LogLevel::kInfo, "broker storage initialized");
   return true;
 }
 
+// 处理所有客户端请求的统一入口
+// 负责请求验证、权限检查、限流和分发到具体的处理函数
 protocol::Response Broker::Handle(const protocol::Request& request) {
   request_count_.fetch_add(1, std::memory_order_relaxed);
   if (!opened_) {
@@ -358,10 +430,12 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
     core::Logger::Instance().Log(core::LogLevel::kError, "broker request received before open");
     return MakeResponse(request, protocol::Status::kInternalError);
   }
+  // 版本校验
   if (request.version != protocol::kCurrentVersion) {
     return MakeResponse(request, protocol::Status::kVersionMismatch,
                         std::string(1, static_cast<char>(protocol::kCurrentVersion)));
   }
+  // Flags 校验
   constexpr std::uint16_t kKnownFlags = protocol::kAckMask | protocol::kFlagProducerMetadata |
                                          protocol::kFlagReplication |
                                          protocol::kFlagReplicationTerm |
@@ -372,6 +446,7 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) != 0 &&
       (request.flags & protocol::kFlagAuthentication) != 0)
     return MakeResponse(request, protocol::Status::kBadRequest);
+  // 请求标准化
   protocol::Request normalized = request;
   const bool replication_command =
       (request.command == protocol::Command::kHeartbeat &&
@@ -379,6 +454,7 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
       request.command == protocol::Command::kReplicaFetch ||
                                    request.command == protocol::Command::kReplicaAppend ||
                                    request.command == protocol::Command::kReplicaVote;
+  // 复制请求验证
   if (replication_command || (request.flags & protocol::kFlagReplication) != 0) {
     if (!ValidateReplicationRequest(request, &normalized))
       return MakeResponse(request, protocol::Status::kBadRequest);
@@ -388,16 +464,18 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
                                    : protocol::Status::kUnauthenticated);
   }
   const auto& dispatch_request = normalized;
+  // ACL 权限检查
   if (!replication_command && !client_auth_token_.empty() &&
       !AuthorizeClientRequest(dispatch_request))
     return MakeResponse(request, protocol::Status::kPermissionDenied);
+  // 统计计数
   if (request.command == protocol::Command::kProduce ||
       request.command == protocol::Command::kProduceBatch) {
     produce_count_.fetch_add(1, std::memory_order_relaxed);
   } else if (request.command == protocol::Command::kFetch) {
     fetch_count_.fetch_add(1, std::memory_order_relaxed);
   }
-  // 所有命令在此分派，统一经过版本、角色、限流和错误码处理路径。
+  // 请求分发到具体的处理函数
   protocol::Response response;
   switch (dispatch_request.command) {
     case protocol::Command::kCreateTopic:
@@ -454,6 +532,8 @@ protocol::Response Broker::Handle(const protocol::Request& request) {
   return response;
 }
 
+// 验证复制请求的合法性
+// 检查 Token、命令类型和 Flags
 bool Broker::ValidateReplicationRequest(const protocol::Request& request,
                                          protocol::Request* normalized) const {
   if (normalized == nullptr || !replication_configured_ || replication_auth_token_.empty() ||
@@ -483,11 +563,12 @@ bool Broker::ValidateReplicationRequest(const protocol::Request& request,
   return true;
 }
 
+// 验证客户端认证 Token
+// 使用常量时间比较防止时序攻击
 bool Broker::ValidateClientAuth(const protocol::Request& request,
                                 protocol::Request* normalized) const {
   if (normalized == nullptr || (request.flags & protocol::kFlagReplication) != 0) return false;
   if (client_auth_token_.empty()) {
-    // 未配置鉴权时拒绝带有伪造鉴权封装的请求，避免业务层误解析 token 前缀。
     return (request.flags & protocol::kFlagAuthentication) == 0;
   }
   if ((request.flags & protocol::kFlagAuthentication) == 0 || request.payload.size() < 2)
@@ -503,12 +584,16 @@ bool Broker::ValidateClientAuth(const protocol::Request& request,
   return true;
 }
 
+// 刷新存储引擎，将所有缓冲数据写入磁盘
 bool Broker::Flush(std::string* error) {
   return storage_.Flush(error);
 }
 
+// 处理心跳请求
+// 支持三种心跳：复制心跳、消费者组心跳、存储刷新心跳
 protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
   consumer_groups_.Expire();
+  // 复制心跳：Follower 向 Leader 报告复制进度
   if ((request.flags & protocol::kFlagReplication) != 0) {
     if (request.topic.empty() || request.payload.size() < 14)
       return MakeResponse(request, protocol::Status::kBadRequest);
@@ -533,6 +618,7 @@ protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
     }
     return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
   }
+  // 消费者组心跳：维持消费者组成员关系
   if (request.payload.size() >= 4) {
     const auto group_size = Get16(request.payload, 0);
     if (request.payload.size() != 4ULL + group_size) return MakeResponse(request, protocol::Status::kBadRequest);
@@ -545,12 +631,15 @@ protocol::Response Broker::HandleHeartbeat(const protocol::Request& request) {
       return MakeResponse(request, protocol::Status::kInvalidOffset);
     return MakeResponse(request, protocol::Status::kOk);
   }
+  // 存储刷新心跳
   if (!request.payload.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
   std::string error;
   if (!storage_.Flush(&error)) return MakeResponse(request, protocol::Status::kStorageError);
   return MakeResponse(request, protocol::Status::kOk);
 }
 
+// 处理加入消费者组请求
+// 注册成员信息和订阅的 Topic 列表
 protocol::Response Broker::HandleJoinGroup(const protocol::Request& request) {
   if (request.payload.size() < 6) return MakeResponse(request, protocol::Status::kBadRequest);
   const auto group_size = Get16(request.payload, 0);
@@ -579,6 +668,8 @@ protocol::Response Broker::HandleJoinGroup(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
+// 处理同步消费者组请求
+// 返回分配给当前成员的分区列表
 protocol::Response Broker::HandleSyncGroup(const protocol::Request& request) {
   if (request.payload.size() < 4) return MakeResponse(request, protocol::Status::kBadRequest);
   const auto group_size = Get16(request.payload, 0);
@@ -600,6 +691,8 @@ protocol::Response Broker::HandleSyncGroup(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
+// 处理获取消费者偏移量请求
+// 返回指定 Group 在指定 Topic/Partition 的已提交偏移量
 protocol::Response Broker::HandleOffsetFetch(const protocol::Request& request) {
   if (request.topic.empty() || request.payload.size() < 6) return MakeResponse(request, protocol::Status::kBadRequest);
   const auto group_size = Get16(request.payload, 0);
@@ -621,6 +714,8 @@ protocol::Response Broker::HandleOffsetFetch(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
+// 处理副本拉取请求
+// Follower 从 Leader 拉取增量消息
 protocol::Response Broker::HandleReplicaFetch(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() != 16)
     return MakeResponse(request, protocol::Status::kBadRequest);
@@ -663,6 +758,8 @@ protocol::Response Broker::HandleReplicaFetch(const protocol::Request& request) 
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
+// 处理副本追加请求
+// Leader 接收 Follower 追加的消息，验证连续性后写入 WAL
 protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() < 8)
     return MakeResponse(request, protocol::Status::kBadRequest);
@@ -732,12 +829,14 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
   if (position != request.payload.size())
     return MakeResponse(request, protocol::Status::kBadRequest);
   const auto partition_key = PartitionKey(request.topic, resolved_partition);
+  // 日志匹配检查
   if ((request.flags & protocol::kFlagReplicationTerm) != 0 &&
       !replication_coordinator_->LogMatches(partition_key, prev_log_index, prev_log_term)) {
     std::string hint;
     Put64(&hint, replication_coordinator_->NextLogIndex(partition_key));
     return MakeResponse(request, protocol::Status::kInvalidOffset, std::move(hint));
   }
+  // 偏移量连续性检查
   std::uint64_t expected_offset = 0;
   if (!storage_.NextOffset(request.topic, resolved_partition, &expected_offset, &error) ||
       messages.front().offset != expected_offset)
@@ -751,6 +850,7 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
       !replication_coordinator_->ObserveAppend(partition_key, term, leader_id, last_offset,
                                                commit))
     return MakeResponse(request, protocol::Status::kStorageError);
+  // 写入 WAL
   for (const auto& message : messages)
     if (!storage_.AppendReplica(request.topic, resolved_partition, message, &error))
       return MakeResponse(request, error == "replica offset gap" ? protocol::Status::kInvalidOffset
@@ -759,6 +859,8 @@ protocol::Response Broker::HandleReplicaAppend(const protocol::Request& request)
   return MakeResponse(request, protocol::Status::kOk);
 }
 
+// 处理投票请求
+// 候选节点请求其他节点投票，支持预投票和正式投票
 protocol::Response Broker::HandleReplicaVote(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) == 0 || request.payload.size() < 10)
     return MakeResponse(request, protocol::Status::kBadRequest);
@@ -779,6 +881,8 @@ protocol::Response Broker::HandleReplicaVote(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
+// 处理提交消费者偏移量请求
+// 将消费者组的消费进度持久化到存储
 protocol::Response Broker::HandleCommitOffset(const protocol::Request& request) {
   std::string_view payload = request.payload;
   std::size_t position = 0;
@@ -815,6 +919,8 @@ protocol::Response Broker::HandleCommitOffset(const protocol::Request& request) 
   return MakeResponse(request, protocol::Status::kOk);
 }
 
+// 处理创建 Topic 请求
+// 创建 Topic 并持久化元数据
 protocol::Response Broker::HandleCreateTopic(const protocol::Request& request) {
   if (request.payload.size() != 4) return MakeResponse(request, protocol::Status::kBadRequest);
   std::lock_guard<std::mutex> lock(topic_metadata_mutex_);
@@ -831,6 +937,8 @@ protocol::Response Broker::HandleCreateTopic(const protocol::Request& request) {
                                                                : protocol::Status::kBadRequest);
 }
 
+// 处理删除 Topic 请求
+// 删除 Topic 及其元数据、消费偏移量和幂等缓存
 protocol::Response Broker::HandleDeleteTopic(const protocol::Request& request) {
   if (!request.payload.empty()) return MakeResponse(request, protocol::Status::kBadRequest);
   std::lock_guard<std::mutex> lock(topic_metadata_mutex_);
@@ -850,6 +958,7 @@ protocol::Response Broker::HandleDeleteTopic(const protocol::Request& request) {
     metadata_store_.Save(queues_.ListTopics(), nullptr);
     return MakeResponse(request, protocol::Status::kStorageError);
   }
+  // 清理幂等缓存
   {
     std::lock_guard<std::mutex> idempotency_lock(idempotency_mutex_);
     const auto prefix = request.topic + "\x1f";
@@ -860,6 +969,7 @@ protocol::Response Broker::HandleDeleteTopic(const protocol::Request& request) {
         ++it;
     }
   }
+  // 清理消费偏移量
   consumer_offsets_.erase(
       std::remove_if(consumer_offsets_.begin(), consumer_offsets_.end(),
                      [&](const core::ConsumerOffset& item) { return item.topic == request.topic; }),
@@ -868,6 +978,8 @@ protocol::Response Broker::HandleDeleteTopic(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk);
 }
 
+// 处理列出 Topic 请求
+// 返回所有 Topic 的名称和分区数
 protocol::Response Broker::HandleListTopic(const protocol::Request& request) {
   if (!request.topic.empty() || !request.payload.empty()) {
     return MakeResponse(request, protocol::Status::kBadRequest);
@@ -883,6 +995,8 @@ protocol::Response Broker::HandleListTopic(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, std::move(payload));
 }
 
+// 处理指标查询请求
+// 返回 Prometheus 格式的指标数据
 protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
   if (!request.topic.empty() || !request.payload.empty() ||
       (request.flags & protocol::kFlagReplication) != 0)
@@ -940,13 +1054,17 @@ protocol::Response Broker::HandleMetrics(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, metrics.str());
 }
 
+// 处理单条消息生产请求
+// 支持幂等去重、限流、配额检查和副本复制
 protocol::Response Broker::HandleProduce(const protocol::Request& request, bool enforce_rate_limit,
                                          bool enforce_topic_quota) {
+  // 检查 Leader 角色
   if ((request.flags & protocol::kFlagReplication) == 0 &&
       (replication_coordinator_->role() != ReplicaRole::kLeader ||
        !replication_coordinator_->CanServeWrites())) {
     return MakeResponse(request, protocol::Status::kNotLeader);
   }
+  // 限流检查
   if (enforce_rate_limit && (request.flags & protocol::kFlagReplication) == 0 &&
       !AllowProduceRequest())
     return MakeResponse(request, protocol::Status::kRateLimited);
@@ -955,6 +1073,7 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
   std::uint64_t producer_id = 0, sequence = 0;
   const bool has_metadata = (request.flags & protocol::kFlagProducerMetadata) != 0;
   std::unique_lock<std::mutex> idempotency_lock;
+  // 幂等缓存检查
   if (has_metadata) {
     if (!Take(payload, &position, 16)) return MakeResponse(request, protocol::Status::kBadRequest);
     producer_id = Get64(payload, 0);
@@ -974,6 +1093,7 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
       return cached;
     }
   }
+  // 解析 payload
   if (position + 4 > payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
   const std::uint32_t requested_partition = Get32(payload, position);
   if (!Take(payload, &position, 4)) return MakeResponse(request, protocol::Status::kBadRequest);
@@ -988,6 +1108,7 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
   if (!Take(payload, &position, value_length) || position != payload.size()) {
     return MakeResponse(request, protocol::Status::kBadRequest);
   }
+  // 分区路由
   std::uint32_t partition = 0;
   std::string error;
   const std::string key(payload.substr(key_position, key_length));
@@ -995,9 +1116,11 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
     return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
                                                           : protocol::Status::kBadRequest);
   }
+  // 配额检查
   if (enforce_topic_quota && (request.flags & protocol::kFlagReplication) == 0 &&
       !AllowTopicBytes(request.topic, static_cast<std::uint64_t>(key_length) + value_length))
     return MakeResponse(request, protocol::Status::kQuotaExceeded);
+  // 写入 WAL
   core::Message message;
   if (!storage_.Append(request.topic, partition, key,
                        std::string(payload.substr(value_position, value_length)), &message,
@@ -1006,13 +1129,16 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
   }
   replication_coordinator_->RecordLocalOffset(PartitionKey(request.topic, partition),
                                                message.offset);
+  // ack=all 时进行副本复制
   if ((request.flags & protocol::kAckMask) == protocol::kAckAll &&
       !Replicate(request.topic, partition, message))
     return MakeResponse(request, protocol::Status::kStorageError);
+  // 构造响应
   std::string response_payload;
   Put32(&response_payload, partition);
   Put64(&response_payload, message.offset);
   auto response = MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
+  // 更新幂等缓存
   if (has_metadata) {
     idempotency_cache_[IdempotencyKey(request.topic, producer_id, sequence)] =
         {response, std::chrono::steady_clock::now() + std::chrono::minutes(5)};
@@ -1020,6 +1146,8 @@ protocol::Response Broker::HandleProduce(const protocol::Request& request, bool 
   return response;
 }
 
+// 执行副本复制
+// 向所有 Peer 发送消息，达到 Quorum 后推进提交索引
 bool Broker::Replicate(const std::string& topic, std::uint32_t partition,
                        const core::Message& message) {
   if (replication_peers_.empty() || replication_quorum_ <= 1) return false;
@@ -1040,6 +1168,8 @@ bool Broker::Replicate(const std::string& topic, std::uint32_t partition,
   return replication_coordinator_->AdvanceCommit(PartitionKey(topic, partition), message.offset);
 }
 
+// 处理批量消息生产请求
+// 将批量请求拆分为单条请求，逐条处理并聚合结果
 protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) {
   if ((request.flags & protocol::kFlagReplication) == 0 &&
       (replication_coordinator_->role() != ReplicaRole::kLeader ||
@@ -1060,6 +1190,7 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
     return MakeResponse(request, protocol::Status::kBadRequest);
   std::vector<protocol::Response> results(count);
   std::vector<bool> is_cached(count, false);
+  // 批量幂等缓存检查
   {
     std::lock_guard<std::mutex> lock(idempotency_mutex_);
     const auto now = std::chrono::steady_clock::now();
@@ -1079,6 +1210,7 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
       }
     }
   }
+  // 解析并准备单条请求
   std::vector<protocol::Request> pending(count);
   std::uint64_t new_bytes = 0;
   for (std::uint32_t i = 0; i < count; ++i) {
@@ -1116,9 +1248,11 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
     new_bytes += message_bytes;
   }
   if (position != payload.size()) return MakeResponse(request, protocol::Status::kBadRequest);
+  // 配额检查
   if ((request.flags & protocol::kFlagReplication) == 0 &&
       !AllowTopicBytes(request.topic, new_bytes))
     return MakeResponse(request, protocol::Status::kQuotaExceeded);
+  // 逐条处理并聚合结果
   std::string response_payload;
   Put32(&response_payload, count);
   for (std::uint32_t i = 0; i < count; ++i) {
@@ -1132,6 +1266,8 @@ protocol::Response Broker::HandleProduceBatch(const protocol::Request& request) 
   return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
 }
 
+// 处理消息拉取请求
+// 从存储引擎读取消息并返回给客户端
 protocol::Response Broker::HandleFetch(const protocol::Request& request) {
   if (request.payload.size() < 16) return MakeResponse(request, protocol::Status::kBadRequest);
   const std::uint32_t partition = Get32(request.payload, 0);
@@ -1157,6 +1293,7 @@ protocol::Response Broker::HandleFetch(const protocol::Request& request) {
     return MakeResponse(request, error == "unknown topic" ? protocol::Status::kUnknownTopic
                                                           : protocol::Status::kInvalidOffset);
   }
+  // 如果指定了消费者组，使用已提交的偏移量作为起始位置
   if (!group.empty()) {
     std::lock_guard<std::mutex> lock(topic_metadata_mutex_);
     const auto it = std::find_if(
@@ -1171,6 +1308,7 @@ protocol::Response Broker::HandleFetch(const protocol::Request& request) {
     return MakeResponse(request, error == "invalid offset" ? protocol::Status::kInvalidOffset
                                                             : protocol::Status::kStorageError);
   }
+  // 构造响应
   std::string response_payload;
   Put32(&response_payload, 0);
   std::uint32_t response_count = 0;
@@ -1195,6 +1333,7 @@ protocol::Response Broker::HandleFetch(const protocol::Request& request) {
   return MakeResponse(request, protocol::Status::kOk, std::move(response_payload));
 }
 
+// 构造响应对象
 protocol::Response Broker::MakeResponse(const protocol::Request& request, protocol::Status status,
                                         std::string payload) const {
   protocol::Response response;

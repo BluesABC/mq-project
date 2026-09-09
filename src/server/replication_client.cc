@@ -1,4 +1,18 @@
-﻿#include "mq/server/replication_client.h"
+﻿// MQ 复制客户端实现
+//
+// ReplicationClient 负责与远程 Broker 节点进行复制通信：
+// 1. 数据拉取：从 Leader 拉取增量消息（REPLICA_FETCH）
+// 2. 数据追加：向 Follower 追加消息（REPLICA_APPEND）
+// 3. 心跳通信：报告复制进度和接收 Leader 状态
+// 4. 选举投票：参与预投票和正式投票
+//
+// 设计特点：
+// - 使用短连接，故障时可以独立重试
+// - 所有请求携带认证 Token，确保安全性
+// - 支持 Windows 和 Linux 跨平台
+// - 请求/响应使用大端序二进制协议
+
+#include "mq/server/replication_client.h"
 
 #include <chrono>
 #include <cstring>
@@ -22,6 +36,8 @@ constexpr Socket kInvalidSocket = -1;
 
 namespace mq::server {
 namespace {
+
+// 关闭 Socket
 void CloseSocket(Socket socket) {
 #ifdef _WIN32
   closesocket(socket);
@@ -29,30 +45,44 @@ void CloseSocket(Socket socket) {
   close(socket);
 #endif
 }
+
+// 向字符串追加 16 位大端序整数
 void Put16(std::string* out, std::uint16_t value) {
   out->push_back(static_cast<char>(value >> 8));
   out->push_back(static_cast<char>(value));
 }
+
+// 向字符串追加 32 位大端序整数
 void Put32(std::string* out, std::uint32_t value) {
   for (int shift = 24; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
+
+// 向字符串追加 64 位大端序整数
 void Put64(std::string* out, std::uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) out->push_back(static_cast<char>(value >> shift));
 }
+
+// 从字符串视图中读取 16 位大端序整数
 std::uint16_t Get16(std::string_view data, std::size_t pos) {
   return (static_cast<std::uint16_t>(static_cast<unsigned char>(data[pos])) << 8) |
          static_cast<unsigned char>(data[pos + 1]);
 }
+
+// 从字符串视图中读取 32 位大端序整数
 std::uint32_t Get32(std::string_view data, std::size_t pos) {
   std::uint32_t value = 0;
   for (int i = 0; i < 4; ++i) value = (value << 8) | static_cast<unsigned char>(data[pos + i]);
   return value;
 }
+
+// 从字符串视图中读取 64 位大端序整数
 std::uint64_t Get64(std::string_view data, std::size_t pos) {
   std::uint64_t value = 0;
   for (int i = 0; i < 8; ++i) value = (value << 8) | static_cast<unsigned char>(data[pos + i]);
   return value;
 }
+
+// 发送所有数据，处理部分发送情况
 bool SendAll(Socket socket, std::string_view data) {
   std::size_t sent = 0;
   while (sent < data.size()) {
@@ -62,6 +92,8 @@ bool SendAll(Socket socket, std::string_view data) {
   }
   return true;
 }
+
+// 接收所有数据，处理部分接收情况
 bool ReceiveAll(Socket socket, char* data, std::size_t size) {
   std::size_t received = 0;
   while (received < size) {
@@ -71,6 +103,8 @@ bool ReceiveAll(Socket socket, char* data, std::size_t size) {
   }
   return true;
 }
+
+// 设置 Socket 超时时间
 void SetTimeout(Socket socket, std::uint32_t timeout_ms) {
 #ifdef _WIN32
   const int value = static_cast<int>(timeout_ms);
@@ -84,8 +118,10 @@ void SetTimeout(Socket socket, std::uint32_t timeout_ms) {
   setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &value, sizeof(value));
 #endif
 }
+
 }  // namespace
 
+// 构造函数，初始化复制客户端
 ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::uint32_t timeout_ms,
                                      std::string auth_token)
     : host_(std::move(host)),
@@ -93,17 +129,21 @@ ReplicationClient::ReplicationClient(std::string host, std::uint16_t port, std::
       timeout_ms_(timeout_ms == 0 ? 1000 : timeout_ms),
       auth_token_(std::move(auth_token)) {}
 
+// 核心 RPC 调用方法
+// 负责建立连接、发送请求、接收响应和解析响应
 bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std::string payload,
                              std::string* response_payload, bool term_payload) {
+  // 检查认证 Token
   if (auth_token_.empty() || auth_token_.size() > UINT16_MAX) {
     error_ = "replication authentication token is not configured";
     return false;
   }
+  // 构造认证载荷：Token 长度 + Token + 实际载荷
   std::string authenticated_payload;
   Put16(&authenticated_payload, static_cast<std::uint16_t>(auth_token_.size()));
   authenticated_payload.append(auth_token_);
   authenticated_payload.append(std::move(payload));
-  // 复制请求使用短连接，故障时可以独立重试且不会把失效连接带入协调状态。
+  // Windows 初始化
 #ifdef _WIN32
   static bool initialized = false;
   if (!initialized) {
@@ -115,11 +155,13 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
     initialized = true;
   }
 #endif
+  // 创建 Socket
   Socket socket = ::socket(AF_INET, SOCK_STREAM, 0);
   if (socket == kInvalidSocket) {
     error_ = "socket failed";
     return false;
   }
+  // DNS 解析
   addrinfo hints{};
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
@@ -130,6 +172,7 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
     error_ = "resolve failed";
     return false;
   }
+  // 设置超时并连接
   SetTimeout(socket, timeout_ms_);
   const bool connected =
       ::connect(socket, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0;
@@ -139,20 +182,24 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
     error_ = "connect failed";
     return false;
   }
+  // 构造请求
   protocol::Request request;
   request.command = static_cast<protocol::Command>(command);
   request.request_id = request_id_++;
   request.flags = protocol::kFlagReplication | (term_payload ? protocol::kFlagReplicationTerm : 0);
   request.topic = topic;
   request.payload = std::move(authenticated_payload);
+  // 编码并发送请求
   std::string frame;
   protocol::Response response;
   const auto request_id = request.request_id;
   bool okay = protocol::ProtocolCodec::EncodeRequest(request, &frame) && SendAll(socket, frame);
+  // 接收响应头
   char header[18]{};
   if (okay && ReceiveAll(socket, header, sizeof(header))) {
     const auto payload_size = Get32(std::string_view(header, sizeof(header)), 14);
     if (payload_size <= protocol::kMaxPayloadBytes) {
+      // 接收完整响应
       std::string full(header, sizeof(header));
       full.resize(18 + payload_size);
       okay = ReceiveAll(socket, full.data() + 18, payload_size) &&
@@ -163,6 +210,7 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
   } else
     okay = false;
   CloseSocket(socket);
+  // 检查响应状态
   if (!okay) {
     if (error_.empty()) error_ = "replication response failed";
     return false;
@@ -176,11 +224,13 @@ bool ReplicationClient::Call(std::uint8_t command, const std::string& topic, std
   return true;
 }
 
+// 从 Leader 拉取增量消息
+// Follower 使用此方法获取新的消息
 bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
                               std::uint64_t offset, std::uint32_t max_bytes,
                               std::vector<core::Message>* messages) {
-  // Fetch 以 offset 增量拉取，Follower 应按返回顺序交给 StorageEngine 追加。
   if (messages == nullptr || max_bytes == 0) return false;
+  // 构造请求载荷：分区 + 偏移量 + 最大字节数
   std::string payload;
   Put32(&payload, partition);
   Put64(&payload, offset);
@@ -190,6 +240,7 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
             &response) ||
       response.size() < 4)
     return false;
+  // 解析响应：消息数量 + 消息列表
   std::size_t position = 4;
   const auto count = Get32(response, 0);
   messages->clear();
@@ -223,12 +274,15 @@ bool ReplicationClient::Fetch(const std::string& topic, std::uint32_t partition,
   return position == response.size();
 }
 
+// 向 Follower 追加消息
+// Leader 使用此方法同步数据给 Follower
 bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition,
                                const std::vector<core::Message>& messages, std::uint64_t term,
                                std::uint64_t commit_index, const std::string& leader_id,
                                std::uint64_t prev_log_index, std::uint64_t prev_log_term,
                                std::uint64_t* next_log_index) {
   if (messages.empty() || leader_id.empty() || leader_id.size() > UINT16_MAX) return false;
+  // 构造请求载荷
   std::string payload;
   Put64(&payload, term);
   Put64(&payload, commit_index);
@@ -238,6 +292,7 @@ bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition
   Put64(&payload, prev_log_term);
   Put32(&payload, partition);
   Put32(&payload, static_cast<std::uint32_t>(messages.size()));
+  // 编码消息列表
   for (const auto& message : messages) {
     Put64(&payload, message.offset);
     Put64(&payload, static_cast<std::uint64_t>(message.timestamp_ms));
@@ -249,10 +304,13 @@ bool ReplicationClient::Append(const std::string& topic, std::uint32_t partition
   std::string response;
   const bool success = Call(static_cast<std::uint8_t>(protocol::Command::kReplicaAppend), topic,
                              std::move(payload), &response, true);
+  // 如果失败且返回了 next_log_index，用于日志冲突恢复
   if (!success && next_log_index != nullptr && response.size() == 8) *next_log_index = Get64(response, 0);
   return success;
 }
 
+// 发送心跳
+// 报告复制进度或接收 Leader 状态
 bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partition,
                                   const std::string& node_id, std::uint64_t replicated_offset,
                                   std::uint64_t term, std::uint64_t commit_index) {
@@ -260,11 +318,13 @@ bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partit
     error_ = "invalid replication node id";
     return false;
   }
+  // 构造心跳载荷
   std::string payload;
   Put16(&payload, static_cast<std::uint16_t>(node_id.size()));
   payload.append(node_id);
   Put32(&payload, partition);
   Put64(&payload, replicated_offset);
+  // 如果携带 term，则是 Leader 发送的心跳
   if (term != 0) {
     Put64(&payload, term);
     Put64(&payload, commit_index);
@@ -273,9 +333,12 @@ bool ReplicationClient::Heartbeat(const std::string& topic, std::uint32_t partit
               nullptr, term != 0);
 }
 
+// 请求投票
+// 候选节点请求其他节点投票
 bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id, bool* granted,
                              std::uint64_t last_log_index, std::uint64_t last_log_term) {
   if (granted == nullptr || candidate_id.empty() || candidate_id.size() > UINT16_MAX) return false;
+  // 构造投票请求载荷
   std::string payload;
   Put64(&payload, term);
   Put16(&payload, static_cast<std::uint16_t>(candidate_id.size()));
@@ -294,10 +357,13 @@ bool ReplicationClient::Vote(std::uint64_t term, const std::string& candidate_id
   return true;
 }
 
+// 请求预投票
+// 预投票不递增任期，用于检测是否有可能赢得选举
 bool ReplicationClient::PreVote(std::uint64_t term, const std::string& candidate_id,
                                 bool* granted, std::uint64_t last_log_index,
                                 std::uint64_t last_log_term) {
   if (granted == nullptr || candidate_id.empty() || candidate_id.size() > UINT16_MAX) return false;
+  // 构造预投票请求载荷
   std::string payload;
   Put64(&payload, term);
   Put16(&payload, static_cast<std::uint16_t>(candidate_id.size()));
