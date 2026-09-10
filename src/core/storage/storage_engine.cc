@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <shared_mutex>
 #include <sstream>
 #include <utility>
 
@@ -230,6 +231,7 @@ struct StorageEngine::Partition {
   std::vector<std::unique_ptr<Segment>> segments;  ///< 段文件列表
   std::uint64_t next_offset = 0;           ///< 下一个可写 offset
   std::chrono::steady_clock::time_point last_sync = std::chrono::steady_clock::now();  ///< 上次刷盘时间
+  mutable std::shared_mutex partition_mutex;  ///< 分区级读写锁，支持分区间并行
 };
 
 StorageEngine::StorageEngine(std::filesystem::path data_dir)
@@ -478,22 +480,26 @@ bool StorageEngine::Append(const std::string& topic, std::uint32_t partition, st
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  // 延迟初始化：如果还没打开，先创建目录
-  if (!opened_) {
-    std::error_code ec;
-    std::filesystem::create_directories(data_dir_ / "queues", ec);
-    if (ec) {
-      if (error) *error = ec.message();
-      return false;
+  // 延迟初始化：如果还没打开，先创建目录（全局锁保护）
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!opened_) {
+      std::error_code ec;
+      std::filesystem::create_directories(data_dir_ / "queues", ec);
+      if (ec) {
+        if (error) *error = ec.message();
+        return false;
+      }
+      opened_ = true;
     }
-    opened_ = true;
   }
 
   // 获取或创建分区
   auto* target = GetPartition(topic, partition, error);
   if (!target) return false;
+
+  // 使用分区级锁，不同分区可以并行写入
+  std::unique_lock lock(target->partition_mutex);
 
   auto& active = target->segments.back();
 
@@ -612,22 +618,26 @@ bool StorageEngine::AppendReplica(const std::string& topic, std::uint32_t partit
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  // 延迟初始化
-  if (!opened_) {
-    std::error_code ec;
-    std::filesystem::create_directories(data_dir_ / "queues", ec);
-    if (ec) {
-      if (error) *error = ec.message();
-      return false;
+  // 延迟初始化（全局锁保护）
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!opened_) {
+      std::error_code ec;
+      std::filesystem::create_directories(data_dir_ / "queues", ec);
+      if (ec) {
+        if (error) *error = ec.message();
+        return false;
+      }
+      opened_ = true;
     }
-    opened_ = true;
   }
 
   // 获取分区
   auto* target = GetPartition(topic, partition, error);
   if (target == nullptr) return false;
+
+  // 使用分区级锁
+  std::unique_lock lock(target->partition_mutex);
 
   // 校验 offset 连续性：副本追加必须严格连续
   if (message.offset != target->next_offset) {
@@ -778,10 +788,11 @@ bool StorageEngine::Read(const std::string& topic, std::uint32_t partition,
                          std::vector<Message>* messages, std::string* error) const {
   if (!IsValidTopicName(topic) || messages == nullptr || max_bytes == 0) return false;
 
-  std::lock_guard<std::mutex> lock(mutex_);
-
   auto* target = GetPartition(topic, partition, error);
   if (!target) return false;
+
+  // 使用分区级读锁，允许多个读线程并行
+  std::shared_lock lock(target->partition_mutex);
 
   // 校验 offset 有效性
   if (start_offset > target->next_offset) {
@@ -824,10 +835,11 @@ bool StorageEngine::NextOffset(const std::string& topic, std::uint32_t partition
                                std::uint64_t* offset, std::string* error) const {
   if (!IsValidTopicName(topic) || offset == nullptr) return false;
 
-  std::lock_guard<std::mutex> lock(mutex_);
-
   auto* target = GetPartition(topic, partition, error);
   if (target == nullptr) return false;
+
+  // 使用分区级读锁
+  std::shared_lock lock(target->partition_mutex);
 
   *offset = target->next_offset;
   return true;
