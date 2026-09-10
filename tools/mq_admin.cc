@@ -13,11 +13,29 @@ struct Options {
   std::uint16_t port = 9092;
   std::uint32_t timeout_ms = 5000;
   std::string auth_token;
+  std::string topic_name;
+  std::uint32_t partitions = 1;
 };
 
 void PrintUsage() {
-  std::cout << "usage: mq_admin metrics|topics [--host HOST] [--port PORT] [--timeout-ms MS]"
-               " [--auth-token TOKEN]\n";
+  std::cout << "usage: mq_admin metrics|topics|create-topic [OPTIONS]\n"
+               "\n"
+               "commands:\n"
+               "  metrics              获取 Broker 指标\n"
+               "  topics               列出所有 Topic\n"
+               "  create-topic         创建 Topic\n"
+               "\n"
+               "options:\n"
+               "  --host HOST          Broker 地址 (默认: 127.0.0.1)\n"
+               "  --port PORT          Broker 端口 (默认: 9092)\n"
+               "  --timeout-ms MS      超时时间 (默认: 5000)\n"
+               "  --auth-token TOKEN   认证 Token\n"
+               "  --topic NAME         Topic 名称 (create-topic 必需)\n"
+               "  --partitions N       分区数量 (默认: 1)\n"
+               "\n"
+               "examples:\n"
+               "  mq_admin create-topic --topic order --partitions 8\n"
+               "  mq_admin topics\n";
 }
 
 bool ParseNumber(const std::string& text, std::uint64_t* value) {
@@ -36,9 +54,16 @@ bool Parse(int argc, char** argv, Options* options) {
   options->command = argv[1];
   for (int index = 2; index < argc; ++index) {
     const std::string name = argv[index];
-    if ((name == "--host" || name == "--port" || name == "--timeout-ms" ||
-         name == "--auth-token") &&
-        index + 1 < argc) {
+    if (name == "--topic" && index + 1 < argc) {
+      options->topic_name = argv[++index];
+    } else if (name == "--partitions" && index + 1 < argc) {
+      std::uint64_t number = 0;
+      if (!ParseNumber(argv[++index], &number) || number == 0 || number > UINT32_MAX)
+        return false;
+      options->partitions = static_cast<std::uint32_t>(number);
+    } else if ((name == "--host" || name == "--port" || name == "--timeout-ms" ||
+                name == "--auth-token") &&
+               index + 1 < argc) {
       const std::string value = argv[++index];
       if (name == "--host")
         options->host = value;
@@ -58,7 +83,9 @@ bool Parse(int argc, char** argv, Options* options) {
       return false;
     }
   }
-  return options->command == "metrics" || options->command == "topics";
+  if (options->command == "create-topic" && options->topic_name.empty()) return false;
+  return options->command == "metrics" || options->command == "topics" ||
+         options->command == "create-topic";
 }
 
 }  // namespace
@@ -84,6 +111,16 @@ int main(int argc, char** argv) {
       return 1;
     }
     std::cout << output;
+    return 0;
+  }
+
+  if (options.command == "create-topic") {
+    if (!client.createTopic(options.topic_name, options.partitions)) {
+      std::cerr << "create-topic failed: " << client.lastError() << '\n';
+      return 1;
+    }
+    std::cout << "topic created: " << options.topic_name << " with " << options.partitions
+              << " partitions\n";
     return 0;
   }
 
