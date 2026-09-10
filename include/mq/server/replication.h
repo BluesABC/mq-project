@@ -30,11 +30,11 @@ enum class ReplicaRole { kLeader, kFollower, kCandidate };
  * 记录每个副本节点的同步状态。
  */
 struct ReplicaProgress {
-  std::string node_id;       ///< 节点 ID
-  std::uint64_t replicated_offset = 0;  ///< 已复制的 offset
+  std::string node_id;                                   ///< 节点 ID
+  std::uint64_t replicated_offset = 0;                   ///< 已复制的 offset
   std::chrono::steady_clock::time_point last_heartbeat;  ///< 最后心跳时间
-  bool healthy = false;      ///< 是否健康（心跳是否超时）
-  std::uint64_t term = 0;    ///< 当前任期
+  bool healthy = false;                                  ///< 是否健康（心跳是否超时）
+  std::uint64_t term = 0;                                ///< 当前任期
 };
 
 /**
@@ -43,8 +43,8 @@ struct ReplicaProgress {
  * 记录选举的任期和候选人信息。
  */
 struct ElectionResult {
-  std::uint64_t term = 0;           ///< 选举任期
-  std::string candidate_id;         ///< 候选人 ID
+  std::uint64_t term = 0;    ///< 选举任期
+  std::string candidate_id;  ///< 候选人 ID
 };
 
 /**
@@ -464,26 +464,26 @@ class ReplicationCoordinator {
 
   // ==================== 成员变量 ====================
 
-  const std::string node_id_;                       ///< 当前节点 ID
+  const std::string node_id_;                          ///< 当前节点 ID
   const std::chrono::milliseconds heartbeat_timeout_;  ///< 心跳超时时间
 
-  mutable std::mutex mutex_;                        ///< 互斥锁
+  mutable std::mutex mutex_;  ///< 互斥锁
 
-  ReplicaRole role_;                                ///< 当前角色
-  std::string leader_id_;                           ///< Leader ID
-  std::string voted_for_;                           ///< 当前任期投票的节点
+  ReplicaRole role_;       ///< 当前角色
+  std::string leader_id_;  ///< Leader ID
+  std::string voted_for_;  ///< 当前任期投票的节点
 
-  std::uint64_t current_term_ = 0;                  ///< 当前任期
-  std::uint64_t local_offset_ = 0;                  ///< 本地写入的 offset
-  std::uint64_t commit_index_ = 0;                  ///< 全局提交索引
-  std::uint64_t last_applied_ = 0;                  ///< 最后应用的索引
+  std::uint64_t current_term_ = 0;  ///< 当前任期
+  std::uint64_t local_offset_ = 0;  ///< 本地写入的 offset
+  std::uint64_t commit_index_ = 0;  ///< 全局提交索引
+  std::uint64_t last_applied_ = 0;  ///< 最后应用的索引
 
-  std::unordered_set<std::string> votes_;           ///< 选举投票
-  std::unordered_set<std::string> pre_votes_;       ///< 预投票
+  std::unordered_set<std::string> votes_;      ///< 选举投票
+  std::unordered_set<std::string> pre_votes_;  ///< 预投票
 
-  std::size_t missed_heartbeat_rounds_ = 0;         ///< 连续未响应的心跳轮次
+  std::size_t missed_heartbeat_rounds_ = 0;  ///< 连续未响应的心跳轮次
 
-  const std::filesystem::path state_path_;          ///< 状态持久化路径
+  const std::filesystem::path state_path_;  ///< 状态持久化路径
 
   std::unordered_map<std::string, ReplicaProgress> replicas_;  ///< 副本进度
 
@@ -491,10 +491,10 @@ class ReplicationCoordinator {
    * @brief 分区级别状态
    */
   struct PartitionState {
-    std::uint64_t local_offset = 0;       ///< 本地 offset
-    std::uint64_t commit_index = 0;       ///< 提交索引
-    std::uint64_t last_applied = 0;       ///< 最后应用的索引
-    std::uint64_t last_log_term = 0;      ///< 最后日志的任期
+    std::uint64_t local_offset = 0;   ///< 本地 offset
+    std::uint64_t commit_index = 0;   ///< 提交索引
+    std::uint64_t last_applied = 0;   ///< 最后应用的索引
+    std::uint64_t last_log_term = 0;  ///< 最后日志的任期
   };
 
   std::unordered_map<PartitionKey, PartitionState> partition_states_;  ///< 分区状态

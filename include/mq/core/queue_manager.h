@@ -17,7 +17,7 @@ namespace mq::core {
  * 消息数据的存储由 StorageEngine 负责，实现关注点分离。
  */
 struct TopicMetadata {
-  std::string name;               ///< Topic 名称，作为唯一标识
+  std::string name;                   ///< Topic 名称，作为唯一标识
   std::uint32_t partition_count = 0;  ///< 该 Topic 的分区数量，必须大于 0
 };
 

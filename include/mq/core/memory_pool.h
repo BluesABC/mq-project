@@ -68,8 +68,12 @@ class MemoryPool {
    */
   bool IsOwnerThread() const;
 
-  std::size_t capacity_bytes() const { return capacity_bytes_; }
-  std::size_t used_bytes() const { return used_bytes_; }
+  std::size_t capacity_bytes() const {
+    return capacity_bytes_;
+  }
+  std::size_t used_bytes() const {
+    return used_bytes_;
+  }
 
  private:
   const std::thread::id owner_thread_id_;

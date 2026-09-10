@@ -175,12 +175,12 @@ class ReplicationClient {
 
   // ==================== 成员变量 ====================
 
-  std::string host_;           ///< 远端 Broker 地址
-  std::uint16_t port_;         ///< 远端 Broker 端口
-  std::uint32_t timeout_ms_;   ///< 请求超时（毫秒）
-  std::string auth_token_;     ///< 认证 Token
+  std::string host_;              ///< 远端 Broker 地址
+  std::uint16_t port_;            ///< 远端 Broker 端口
+  std::uint32_t timeout_ms_;      ///< 请求超时（毫秒）
+  std::string auth_token_;        ///< 认证 Token
   std::uint64_t request_id_ = 1;  ///< 请求 ID 计数器
-  std::string error_;          ///< 最近的错误信息
+  std::string error_;             ///< 最近的错误信息
 };
 
 }  // namespace mq::server

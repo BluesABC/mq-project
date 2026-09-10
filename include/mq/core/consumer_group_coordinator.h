@@ -16,7 +16,7 @@ namespace mq::core {
  * 在消费者组的 Rebalance 过程中生成。
  */
 struct GroupAssignment {
-  std::string topic;      ///< Topic 名称
+  std::string topic;            ///< Topic 名称
   std::uint32_t partition = 0;  ///< 分区号
 };
 
@@ -67,8 +67,7 @@ class ConsumerGroupCoordinator {
    * @param member_timeout 成员心跳超时时间，默认 30 秒
    *        超时后成员会被认为已离开，触发 Rebalance
    */
-  explicit ConsumerGroupCoordinator(
-      std::chrono::seconds member_timeout = std::chrono::seconds(30));
+  explicit ConsumerGroupCoordinator(std::chrono::seconds member_timeout = std::chrono::seconds(30));
 
   /**
    * @brief 消费者加入组
@@ -86,8 +85,7 @@ class ConsumerGroupCoordinator {
    * @return true 加入成功；false 参数无效或组不存在
    */
   bool Join(const std::string& group, const std::string& member_id,
-            const std::vector<std::string>& topics,
-            Clock::time_point now = Clock::now());
+            const std::vector<std::string>& topics, Clock::time_point now = Clock::now());
 
   /**
    * @brief 消费者心跳
@@ -174,7 +172,7 @@ class ConsumerGroupCoordinator {
    * @return 分配结果列表，成员不存在时返回空列表
    */
   std::vector<GroupAssignment> Assignment(const std::string& group,
-                                         const std::string& member_id) const;
+                                          const std::string& member_id) const;
 
  private:
   /**

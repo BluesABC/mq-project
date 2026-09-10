@@ -242,9 +242,9 @@ class MpmcQueue {
     return true;
   }
 
-  const std::size_t capacity_;      ///< 队列容量（2 的幂）
-  const std::size_t mask_;          ///< 掩码，用于位运算计算索引（capacity_ - 1）
-  std::unique_ptr<Cell[]> cells_;   ///< 槽位数组
+  const std::size_t capacity_;     ///< 队列容量（2 的幂）
+  const std::size_t mask_;         ///< 掩码，用于位运算计算索引（capacity_ - 1）
+  std::unique_ptr<Cell[]> cells_;  ///< 槽位数组
 
   /**
    * @brief 入队位置（写指针）

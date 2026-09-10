@@ -75,11 +75,11 @@ struct TlsOptions {
  * 表示 TLS 读写操作的状态，用于非阻塞 IO 的状态机。
  */
 enum class TlsIoResult {
-  kOk,        ///< 操作成功
-  kWantRead,  ///< 需要读取更多数据（握手未完成）
-  kWantWrite, ///< 需要写入更多数据（握手未完成）
-  kClosed,    ///< 连接已关闭
-  kError      ///< 发生错误
+  kOk,         ///< 操作成功
+  kWantRead,   ///< 需要读取更多数据（握手未完成）
+  kWantWrite,  ///< 需要写入更多数据（握手未完成）
+  kClosed,     ///< 连接已关闭
+  kError       ///< 发生错误
 };
 
 /**

@@ -20,10 +20,10 @@ namespace mq::core {
  * - 支持自动提交和手动提交两种模式
  */
 struct ConsumerOffset {
-  std::string group;              ///< 消费者组名称
-  std::string topic;              ///< Topic 名称
-  std::uint32_t partition = 0;    ///< 分区号
-  std::uint64_t offset = 0;       ///< 消费偏移量（下一条要消费的位置）
+  std::string group;            ///< 消费者组名称
+  std::string topic;            ///< Topic 名称
+  std::uint32_t partition = 0;  ///< 分区号
+  std::uint64_t offset = 0;     ///< 消费偏移量（下一条要消费的位置）
 };
 
 /**

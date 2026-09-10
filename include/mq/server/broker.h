@@ -11,8 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "mq/core/consumer_offset_store.h"
 #include "mq/core/consumer_group_coordinator.h"
+#include "mq/core/consumer_offset_store.h"
 #include "mq/core/queue_manager.h"
 #include "mq/core/storage_engine.h"
 #include "mq/core/topic_metadata_store.h"
@@ -26,10 +26,10 @@ namespace mq::server {
  * 描述集群中的一个节点，用于主从复制和高可用。
  */
 struct ReplicationPeer {
-  std::string node_id;       ///< 节点唯一标识
-  std::string host;          ///< 节点 IP 地址
-  std::uint16_t port = 0;    ///< 节点端口
-  bool leader = false;       ///< 是否为 Leader
+  std::string node_id;     ///< 节点唯一标识
+  std::string host;        ///< 节点 IP 地址
+  std::uint16_t port = 0;  ///< 节点端口
+  bool leader = false;     ///< 是否为 Leader
 };
 
 /**
@@ -39,9 +39,9 @@ struct ReplicationPeer {
  * 空的 Topic 列表表示不限制 Topic。
  */
 struct ClientAuthorization {
-  bool allow_admin = true;                ///< 是否允许管理操作
-  bool allow_produce = true;              ///< 是否允许生产消息
-  bool allow_consume = true;              ///< 是否允许消费消息
+  bool allow_admin = true;                  ///< 是否允许管理操作
+  bool allow_produce = true;                ///< 是否允许生产消息
+  bool allow_consume = true;                ///< 是否允许消费消息
   std::vector<std::string> produce_topics;  ///< 允许生产的 Topic 列表
   std::vector<std::string> consume_topics;  ///< 允许消费的 Topic 列表
 };
@@ -359,16 +359,16 @@ class Broker {
 
   // ==================== 成员变量 ====================
 
-  core::StorageEngine storage_;              ///< 存储引擎
-  std::filesystem::path data_dir_;           ///< 数据目录
-  core::TopicMetadataStore metadata_store_;  ///< Topic 元数据存储
-  core::ConsumerOffsetStore offset_store_;   ///< 消费者偏移量存储
+  core::StorageEngine storage_;                     ///< 存储引擎
+  std::filesystem::path data_dir_;                  ///< 数据目录
+  core::TopicMetadataStore metadata_store_;         ///< Topic 元数据存储
+  core::ConsumerOffsetStore offset_store_;          ///< 消费者偏移量存储
   core::ConsumerGroupCoordinator consumer_groups_;  ///< 消费者组协调器
-  core::StorageConfig storage_config_;       ///< 存储配置
+  core::StorageConfig storage_config_;              ///< 存储配置
 
   std::vector<core::ConsumerOffset> consumer_offsets_;  ///< 内存中的偏移量缓存
 
-  core::QueueManager queues_;                ///< 队列管理器
+  core::QueueManager queues_;  ///< 队列管理器
 
   /**
    * @brief Topic 元数据互斥锁
@@ -376,7 +376,7 @@ class Broker {
    */
   std::mutex topic_metadata_mutex_;
 
-  bool opened_ = false;                      ///< 是否已打开
+  bool opened_ = false;  ///< 是否已打开
 
   /**
    * @brief 幂等缓存互斥锁
@@ -387,7 +387,7 @@ class Broker {
    * @brief 幂等缓存条目
    */
   struct IdempotencyEntry {
-    protocol::Response response;             ///< 缓存的响应
+    protocol::Response response;                       ///< 缓存的响应
     std::chrono::steady_clock::time_point expires_at;  ///< 过期时间
   };
 
@@ -399,22 +399,22 @@ class Broker {
 
   // ==================== 复制相关 ====================
 
-  std::string node_id_ = "node-local";       ///< 当前节点 ID
+  std::string node_id_ = "node-local";              ///< 当前节点 ID
   std::vector<ReplicationPeer> replication_peers_;  ///< 复制对等节点
-  std::string replication_auth_token_;        ///< 复制认证 Token
-  std::string client_auth_token_;            ///< 客户端认证 Token
-  ClientAuthorization client_authorization_;  ///< 客户端授权信息
+  std::string replication_auth_token_;              ///< 复制认证 Token
+  std::string client_auth_token_;                   ///< 客户端认证 Token
+  ClientAuthorization client_authorization_;        ///< 客户端授权信息
 
-  bool replication_configured_ = false;      ///< 是否配置了复制
-  std::size_t replication_quorum_ = 0;       ///< 复制 quorum
+  bool replication_configured_ = false;  ///< 是否配置了复制
+  std::size_t replication_quorum_ = 0;   ///< 复制 quorum
 
   std::unique_ptr<class ReplicationCoordinator> replication_coordinator_;  ///< 复制协调器
 
-  bool follower_ = false;                    ///< 是否为 Follower 模式
-  std::atomic<bool> stop_replication_{false}; ///< 停止复制标志
-  std::condition_variable replication_cv_;   ///< 复制线程条件变量
-  std::mutex replication_mutex_;             ///< 复制互斥锁
-  std::thread replication_thread_;           ///< 复制线程
+  bool follower_ = false;                      ///< 是否为 Follower 模式
+  std::atomic<bool> stop_replication_{false};  ///< 停止复制标志
+  std::condition_variable replication_cv_;     ///< 复制线程条件变量
+  std::mutex replication_mutex_;               ///< 复制互斥锁
+  std::thread replication_thread_;             ///< 复制线程
 
   /**
    * @brief 复制偏移量跟踪
@@ -456,8 +456,9 @@ class Broker {
    * @brief Topic 配额窗口
    */
   struct TopicQuotaWindow {
-    std::uint64_t bytes = 0;                 ///< 窗口内累计字节数
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();  ///< 窗口开始时间
+    std::uint64_t bytes = 0;  ///< 窗口内累计字节数
+    std::chrono::steady_clock::time_point start =
+        std::chrono::steady_clock::now();  ///< 窗口开始时间
   };
 
   /**

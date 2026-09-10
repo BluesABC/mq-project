@@ -86,7 +86,9 @@ class SlabAllocator {
   /**
    * @brief 获取所有桶已分配的总字节数（后备池容量之和）
    */
-  std::size_t total_allocated_bytes() const { return total_allocated_; }
+  std::size_t total_allocated_bytes() const {
+    return total_allocated_;
+  }
 
   /**
    * @brief 获取当前从后备池中实际使用的字节数

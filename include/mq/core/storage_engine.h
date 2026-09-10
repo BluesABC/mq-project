@@ -304,8 +304,8 @@ class StorageEngine {
    */
   void CleanerLoop();
 
-  std::filesystem::path data_dir_;      ///< 数据存储目录
-  StorageConfig config_;                ///< 存储配置
+  std::filesystem::path data_dir_;  ///< 数据存储目录
+  StorageConfig config_;            ///< 存储配置
 
   /**
    * @brief 互斥锁，保护 partitions_ 的并发访问

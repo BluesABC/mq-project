@@ -89,9 +89,13 @@ class ObjectPool {
   }
 
   /// 池的总容量
-  std::size_t capacity() const { return capacity_; }
+  std::size_t capacity() const {
+    return capacity_;
+  }
   /// 当前空闲对象数
-  std::size_t available() const { return free_list_.size(); }
+  std::size_t available() const {
+    return free_list_.size();
+  }
 
  private:
   const std::thread::id owner_thread_id_;

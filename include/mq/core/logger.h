@@ -135,15 +135,15 @@ class Logger {
 
   // ==================== 成员变量 ====================
 
-  std::mutex mutex_;              ///< 互斥锁，保护并发访问
+  std::mutex mutex_;  ///< 互斥锁，保护并发访问
 
   LogLevel level_ = LogLevel::kInfo;  ///< 当前日志级别
 
-  std::filesystem::path file_path_;   ///< 日志文件路径
-  std::ofstream file_;                ///< 日志文件流
+  std::filesystem::path file_path_;  ///< 日志文件路径
+  std::ofstream file_;               ///< 日志文件流
 
-  std::size_t max_file_bytes_ = 0;    ///< 单个文件最大大小
-  std::size_t file_bytes_ = 0;        ///< 当前文件已写入的字节数
+  std::size_t max_file_bytes_ = 0;  ///< 单个文件最大大小
+  std::size_t file_bytes_ = 0;      ///< 当前文件已写入的字节数
 };
 
 }  // namespace mq::core
