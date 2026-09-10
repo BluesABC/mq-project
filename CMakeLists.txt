@@ -84,6 +84,7 @@ endif()
 add_library(mq_core
   src/core/logger.cc
   src/core/consumer_offset_store.cc
+  src/core/slab_allocator.cc
   src/core/consumer_group_coordinator.cc
   src/core/memory_pool.cc
   src/core/queue_manager.cc

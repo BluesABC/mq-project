@@ -266,7 +266,7 @@ Reactor 收到完整帧 ──► MPMC 任务队列 ──► Worker 池
 - 每个 Worker 线程独立 Arena，线程退出时回收 → 无跨线程释放竞争。
 - 扩容策略：固定块池不足时倍增扩容，池大小可配置（`memory.pool_size`）。
 
-当前基础实现提供 owner-thread `MemoryPool` 和一次性分配的固定容量 `Buffer`，超限时直接失败以触发上层背压；Slab 分桶和对象复用将在连接管理接入后补齐。
+当前已实现：`MemoryPool`（线性分配 + Reset 复用）、`SlabAllocator`（9 个大小类 16B–4KB 分桶 + 侵入式空闲链表 + 后备池倍增扩容）、`ObjectPool<T>`（预分配 + 空闲链表对象复用）。大对象（>4KB）直通 malloc/free。所有组件均为 owner-thread 单线程使用，分配失败返回 nullptr 触发上层背压。
 
 ### 4.2 对象池
 
